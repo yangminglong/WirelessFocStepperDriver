@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FocStepper OTA</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:34rem;margin:2rem auto;padding:0 1rem;line-height:1.6}
+  h1{font-size:1.25rem}
+  #log{white-space:pre-wrap;background:#111;color:#0f0;padding:.75rem;border-radius:6px;
+       font-family:ui-monospace,monospace;font-size:.85rem;min-height:6rem;max-height:18rem;overflow:auto}
+  button{padding:.6rem 1.2rem;font-size:1rem;border-radius:6px;border:0;background:#2563eb;color:#fff;cursor:pointer}
+  button:disabled{background:#94a3b8;cursor:not-allowed}
+  progress{width:100%;height:1rem}
+  .warn{color:#b91c1c}
+</style>
+</head>
+<body>
+<h1>FocStepper 驱动板 OTA</h1>
+<p class="warn">⚠️ 升级期间电机必须处于停止且门已脱离的状态。升级完成后设备会自动重启。</p>
+<p>选择 <code>focstep_driver.bin</code>：</p>
+<input type="file" id="f" accept=".bin">
+<p><button id="go" disabled>上传并升级</button></p>
+<progress id="p" value="0" max="100" hidden></progress>
+<div id="log">就绪。</div>
+
+<script>
+const f=document.getElementById('f'),go=document.getElementById('go'),
+      p=document.getElementById('p'),log=document.getElementById('log');
+let t0=0;
+const say=s=>{log.textContent+=s+"\n";log.scrollTop=log.scrollHeight;};
+f.onchange=()=>{go.disabled=!f.files.length;};
+
+go.onclick=async()=>{
+  const file=f.files[0]; if(!file) return;
+  go.disabled=true; p.hidden=false; p.value=0; t0=performance.now();
+  say(`上传 ${file.name} (${(file.size/1024).toFixed(0)} KB)...`);
+  try{
+    const r=await fetch('/ota',{method:'POST',
+      headers:{'Content-Type':'application/octet-stream'},
+      body:file});
+    const txt=await r.text();
+    if(r.ok){say("✅ 升级成功，设备即将重启。");}
+    else   {say(`❌ 失败 (HTTP ${r.status}): ${txt}`);go.disabled=false;}
+  }catch(e){
+    // 设备在写入完成后立即重启会掐断连接 —— 这通常是成功而非失败
+    say(`连接中断 (${e.message})。若设备已重启即表示升级成功，请刷新页面确认版本。`);
+  }
+  const dt=(performance.now()-t0)/1000;
+  say(`用时 ${dt.toFixed(1)} s`);
+};
+</script>
+</body>
+</html>

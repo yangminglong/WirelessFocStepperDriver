@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.0"
+  # 周期广播示例的公共部分 (ble_hs 初始化等)
+  nimble_peripheral_utils:
+    path: ${IDF_PATH}/examples/bluetooth/nimble/common/nimble_peripheral_utils

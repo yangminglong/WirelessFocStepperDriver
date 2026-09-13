@@ -6,3 +6,20 @@ Thumbs.db
 
 # 文档备份（入库后由 git 历史替代）
 *.bak
+
+# ---- ESP-IDF 构建产物 ----
+# sdkconfig 是 menuconfig 的产物, 由 sdkconfig.defaults 生成, 不入库。
+# ⚠️ 改了 sdkconfig.defaults 后必须 `rm -f sdkconfig` 再 build —— 否则新条目
+#    和新增 Kconfig 符号都不会生效 (后者直接编译报未声明)。本项目踩过两次。
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+compile_commands.json
+.vscode/
+
+# 注意: dependencies.lock **要入库** —— ESP-IDF 对应用工程的建议是提交它,
+# 才能固定托管组件的确切版本、保证可复现构建。不要加进忽略列表。
+
+# 本地凭据 (Wi-Fi SSID/密码等)
+sdkconfig.defaults.local

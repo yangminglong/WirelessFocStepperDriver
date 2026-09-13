@@ -1,0 +1,46 @@
+menu "FocStepper 无线唤醒发送端"
+
+    config SENDER_RECEIVER_ID
+        hex "目标 receiver_id"
+        default 0x1
+        help
+            驱动板的 FOCSTEP_RECEIVER_ID。0 = 广播给所有板。
+            两端必须一致, 否则接收端会判 FOC_LINK_NOT_FOR_ME 丢弃。
+
+    config SENDER_PA_ITVL_MS
+        int "周期广播间隔 (ms)"
+        range 8 81918
+        default 240
+        help
+            ⚠️ **itvl_min 与 itvl_max 必须相等** —— 否则控制器会在区间内任选,
+            接收端的 T = itvl × (skip+1) 就不可控 (实测踩过: 请求 120~240ms 时
+            控制器取了上限 240ms)。
+
+            发射端**没有 skip 自由度**(它是发送方), 所以这个值直接决定发射功耗:
+              I_TX ≈ floor + C_TX / itvl,  C_TX ≈ 0.134 mA·s (C6 实测)
+            同时它也是唤醒时延的下界。
+
+    config SENDER_REPEAT
+        int "每条指令重复发送次数"
+        range 1 32
+        default 5
+        help
+            PA 是单向无确认链路。靠重复发送换取可靠性, 比 PAwR 便宜得多
+            (PAwR 要接收端回 response, 成本 +C_TX 相对 C_RX 是 +80%)。
+            重复次数 × PA 间隔 = 指令从发出到被接收端看到的最坏时延。
+
+    config SENDER_TX_POWER_N9
+        bool "-9 dBm (省电, 覆盖略小)"
+        default n
+        help
+            ⚠️ 实测: -9dBm 只让 C_TX 降 **2%** —— 降功率几乎不省电 (02 §2.4)。
+            它的实际用途是**缩小覆盖范围**做区域隔离, 不是省电。
+
+    config SENDER_QUIET
+        bool "静默模式 (只发 CMD_NONE 心跳)"
+        default n
+        help
+            不发送任何动作指令, 只维持周期广播。用于测发射端基线功耗。
+            对齐 ADI 的语义: 无事件时不递增 DID。
+
+endmenu

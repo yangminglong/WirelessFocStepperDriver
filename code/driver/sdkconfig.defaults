@@ -1,0 +1,69 @@
+# ---- 目标与 flash ----
+CONFIG_IDF_TARGET="esp32c6"
+# ESP32-C6-MINI-1 板载 4MB flash。不显式写的话 IDF 默认按 2MB 算,
+# 而 two_ota_large 分区表要 3.5MB ⇒ 直接构建失败。
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# ---- ★ 必须: FreeRTOS 时基 1000Hz ----
+# esp_simplefoc 的 README 明确要求。100Hz(默认)下 vTaskDelayUntil 的分辨率是 10ms,
+# 1kHz 的 FOC 循环根本无法成立, 电机会有异响甚至失步。
+CONFIG_FREERTOS_HZ=1000
+
+# ---- CPU: C6 单核, 160MHz ----
+# FOC 循环 + I2C 读 + ADC 读都在一个核上, 160MHz 留足余量。
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# ---- main 任务栈 ----
+# esp_console + FOC 初始化 + C++ 对象构造都在 main 里, 默认 3.5KB 不够。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---- 编译优化 ----
+# FOC 是硬实时的, 用 -O2。
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# ---- 控制台: UART0 (经板载串口桥) ----
+# 不用原生 USB-Serial-JTAG: ① 经 USJ 的复位会让 ROM 进下载模式; ② USJ 不支持轻睡(IDF-6395)。
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n
+
+# ---- 电源管理与 tickless ----
+# 深睡是主路径, 但运行/唤醒接管态也希望空闲时能自动轻睡。
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+CONFIG_ESP_PHY_MAC_BB_PD=y
+CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y
+
+# ---- 深睡 ----
+# 保留 RTC 域, 深睡时给 flash 掉电。
+CONFIG_ESP_SLEEP_POWER_DOWN_FLASH=y
+
+# ---- I2C: 必须用**旧版** i2c 驱动 ----
+# 两个理由:
+#  ① i2c_bus 默认(BACKWARD_CONFIG=n)会自带一份 i2c_config_t, 与 driver/i2c.h 冲突,
+#     而 esp_simplefoc 的 AS5600 与本工程的 KTH5701 都按旧版结构体写 (.master.clk_speed)。
+#  ② KTH5701 需要"写 N 字节 → STOP → 独立读"的事务结构 (参考实现用
+#     Linux 的两段独立事务), 只有旧版命令链 (i2c_cmd_link_create / i2c_bus_cmd_begin)
+#     才能精确控制。
+CONFIG_I2C_BUS_BACKWARD_CONFIG=y
+
+# ---- ADC ----
+# IPROPI 在 1.5A 时约 2.36V, 必须 12dB 档 (0dB 量程只有 ~1.1V)。
+CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM=n
+
+# ---- 分区表: 双 OTA ----
+# 驱动板需要能远程升级 (门装好之后再拆板成本极高)。
+CONFIG_PARTITION_TABLE_TWO_OTA_LARGE=y
+
+# ---- 日志 ----
+# ⚠️ 日志会占 CPU 与串口时间。默认 INFO; 定位 FOC 循环瓶颈时再临时开 DEBUG。
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ---- BW20 (省 flash / RAM) ----
+CONFIG_BT_ENABLED=n
+CONFIG_ESP_WIFI_ENABLED=n
+
+# ---- 堆 ----
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304

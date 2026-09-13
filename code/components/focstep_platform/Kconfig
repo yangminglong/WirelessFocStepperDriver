@@ -1,0 +1,502 @@
+# FocStepper 平台层配置 —— 跨项目复用
+#
+# 只放**与应用无关**的参数: 电机/传感器/通信/电源硬件/OTA。
+# 应用策略参数 (助动力矩、保持时长、寻址 ID 等) 在 driver/main/Kconfig.projbuild。
+
+menu "FocStepper 平台层"
+
+    menu "电机与 FOC"
+
+        config FOCSTEP_MOTOR_STEPS_PER_REV
+            int "电机整步数/转"
+            range 8 4096
+            default 200
+            help
+                1.8° 混合式步进 = 200 步/转 (50 极对)。
+
+        config FOCSTEP_POLE_PAIRS
+            int "极对数 pp"
+            default 50
+            help
+                StepperMotor(pp, ...) 的 pp 参数 = 整步数 / 4。
+                1.8° 步进 (200 步/转) ⇒ pp = 50。
+                ⚠️ 改电机时必须同步改这一项, 否则电角换算全错、initFOC 对齐失败。
+
+        config FOCSTEP_PHASE_RESISTANCE
+            string "相电阻 (Ω, 浮点)"
+            default "1.2"
+            help
+                TorqueControlType::estimated_current 必需。
+                **必须由上板 characteriseMotor() 实测**后回填 —— 出厂默认值只是占位,
+                填错只影响力矩估算精度, 不会损坏硬件。
+
+        choice FOCSTEP_TORQUE_CONTROL
+            prompt "力矩控制类型"
+            default FOCSTEP_TC_ESTIMATED
+
+            config FOCSTEP_TC_VOLTAGE
+                bool "voltage (电压模式, 最简)"
+                help
+                    直接给 q 轴电压。开环力矩, 不随温度/母线电压补偿。
+                    没有任何前置条件, 最适合首次上板。
+
+            config FOCSTEP_TC_ESTIMATED
+                bool "estimated_current (模型估算, 默认)"
+                help
+                    Uq = i_q × phase_resistance + 反电动势。
+                    **需要 FOCSTEP_PHASE_RESISTANCE 已实测回填** —— 没填会退回 voltage。
+                    拿到电流环大部分收益, 且零额外硬件。
+
+            config FOCSTEP_TC_FOC_CURRENT
+                bool "foc_current (实测电流环, 用 IPROPI)"
+                help
+                    ⚠️ 实验性。双 PI 闭环 (d/q), 反馈来自 DRV8874 的 IPROPI 两路。
+
+                    这条路是**可行的**(基类 CurrentSense 已内建步进分支, 两相免 Clarke),
+                    但有本质缺陷, 上板前请读 ipropi_current_sense.h 的"已知限制":
+                      · **IPROPI 无符号** ⇒ 符号靠指令方向重建, **过零点附近有死区**
+                      · 符号有 1 个 FOC 周期滞后
+                      · 两相非同时采样 (~40µs 偏差)
+                      · AERR ±6% (1–2A 档), <0.4A 有固定偏置 ⇒ 传感器偏粗
+                      · 超过 ITRIP(≈1.49A) 读数被钳位不再上升
+
+                    建议先用 voltage 跑通 FOC 与限位, 再切本项调电流环。
+        endchoice
+
+        config FOCSTEP_CURRENT_LIMIT
+            int "电流上限 (mA)"
+            default 1500
+            help
+                foc_current / estimated_current 的电流限幅。
+                ⚠️ 必须 <= ITRIP (≈1.49A), 否则环会要求一个 DRV8874 给不出的电流。
+                同时它也是 PID_current_d/q 的输出限幅 (updateCurrentLimit 会同步)。
+
+        config FOCSTEP_PID_CURR_P
+            string "电流环 P"
+            default "0.2"
+            help
+                ⚠️ 出厂默认只是个保守起点。**必须上板整定**:
+                先用小值, 看阶跃响应, 逐步加 P 到临界振荡再退一半。
+
+        config FOCSTEP_PID_CURR_I
+            string "电流环 I"
+            default "20.0"
+
+        config FOCSTEP_PID_CURR_D
+            string "电流环 D"
+            default "0.0"
+
+        config FOCSTEP_PID_CURR_LPF
+            string "电流环低通滤波时间常数 (s)"
+            default "0.005"
+            help
+                反馈低通 (LPF_current_q/d)。IPROPI 的 10nF (τ=35µs) 已经滤过一次,
+                这里再滤是为了压住钳位附近的读数跳变。太大将拖慢环。
+
+        config FOCSTEP_VOLTAGE_LIMIT
+            string "电压上限 (V, 浮点)"
+            default "12.0"
+            help
+                motor.voltage_limit。必须 <= 母线电压 * 0.5 (符号-幅值驱动的物理上限),
+                否则会出现电流反向不受控。24V 母线时建议 6~12V。
+
+        config FOCSTEP_VELOCITY_LIMIT
+            string "速度上限 (rad/s, 浮点)"
+            default "20.0"
+
+        config FOCSTEP_FOC_PERIOD_MS
+            int "FOC 任务周期 (ms)"
+            range 1 20
+            default 1
+            help
+                1ms = 1kHz。上限由 I2C 读决定 (KTH5701 读一次约 150~250µs @400kHz),
+                **不要指望更高** —— 再快也是被 I2C 卡住, 只会让 loopFOC 超时抖动。
+
+        config FOCSTEP_PHEN_SWAPPED
+            bool "交换 EN/PH 引脚 (上板裁决项)"
+            default n
+            help
+                ⚠️ **这是必须上板裁决的一项。**
+
+                DRV8874 数据手册的引脚名是 EN/IN1 和 PH/IN2 (EN 在 IN1 上);
+                而 docs/doc.md §四 的引脚表把 GPIO10 标成 "IN2(EN)"、GPIO11 标成 "IN1(PH)",
+                两者交叉。文档没说清是按引脚名还是按功能标。
+
+                PH/EN 模式下**只有 EN=0 是 Brake**。若认反了, "先切 brake"会变成
+                "EN 仍为 1、PH=0" = 满压反转驱动 —— 唤醒瞬间猛冲。
+
+                默认(关)  = GPIO10=EN、GPIO11=PH (按功能标注)
+                打开       = GPIO11=EN、GPIO10=PH (按引脚名标注)
+
+                裁决方法: 两相 EN 全拉低后用手转轴, 应有明显阻尼且电机不主动转。
+
+        config FOCSTEP_MOTION_DOWNSAMPLE
+            int "位置/速度环降频比 (FOC 周期数)"
+            range 1 20
+            default 1
+            help
+                位置/速度环没必要跟 1kHz。设为 N 表示每 N 个 FOC 周期跑一次 move()。
+                力矩环仍按 FOC 周期跑。
+
+    endmenu
+
+    menu "编码器 KTH5701"
+
+        config FOCSTEP_ENCODER_I2C_ADDR
+            hex "I2C 从机地址"
+            default 0x68
+            help
+                KTH5701 地址 = 0x68 | (A1?2:0) | (A0?1:0), 即 0x68/0x69/0x6A/0x6B。
+                由板上 A0/A1 跳线决定。参考实现用 0x68 (A1=A0=0)。
+                ⚠️ 量产板若改跳线, 这里必须同步改; 可用 `dump` 自检命令扫出实际地址。
+
+        config FOCSTEP_ENCODER_I2C_HZ
+            int "I2C 时钟频率 (Hz)"
+            default 400000
+            help
+                KTH5701 支持 100k/400k。400k 时一次读约 150~250µs。
+
+        config FOCSTEP_ENCODER_DIRECTION
+            int "角度方向"
+            range -1 1
+            default 1
+            help
+                1 = 正向; -1 = 取反。
+                由磁铁的充磁方向与安装面决定, **必须上板用手转轴确认**
+                (自检: 正转时角度应单调增; 若反了改这里, 不要去改接线)。
+
+        config FOCSTEP_ENCODER_ZERO_OFFSET
+            string "零位偏置 (rad, 浮点)"
+            default "0.0"
+            help
+                机械零位到电气零位的偏移。initFOC() 会自动对齐电气角,
+                本项只用于让 sensor 的 0 对准机构 0 (推拉门的"全关"位置)。
+
+        config FOCSTEP_ENCODER_MIN_ANGLE
+            string "机械行程下限 (rad, 浮点)"
+            default "0.0"
+
+        config FOCSTEP_ENCODER_MAX_ANGLE
+            string "机械行程上限 (rad, 浮点)"
+            default "6.28318530718"
+            help
+                上下限一起定义限位。上电自学习会根据实际行程覆盖 (存 NVS)。
+
+        config FOCSTEP_ENCODER_WAKE_DIFF
+            hex "Wake-up&Sleep 变化阈值寄存器值"
+            default 0x0
+            help
+                KTH5701 在 Wake-up&Sleep 档下, 被测项变化超过阈值即拉高 INT。
+                **这就是"手拉灵敏度"** —— 直接决定多小的门位移能唤醒。
+                0 = 使用芯片上电默认, 不覆写。
+                ⚠️ 具体寄存器号与量纲待上板用 `dump` 自检裁决 (见 docs/doc.md §九 待核实 #1)。
+
+        config FOCSTEP_ENCODER_REG_INIT
+            bool "上电写入参考寄存器初始化序列"
+            default y
+            help
+                写入 reg 0x1C=0x1636 / 0x1D=0x0002 / 0x1E=0x8000。
+                ⚠️ 这组值来自 GPL 参考实现 (在真板上跑通), 但与本项目从数据手册
+                记下的寄存器号**冲突**。上板第一件事是用自检命令回读比对裁决。
+                若关掉本项, 芯片用上电默认值。
+
+    endmenu
+
+    menu "电流采样 (IPROPI)"
+
+        config FOCSTEP_ADC_ATTEN_DB
+            int "ADC 衰减 (dB)"
+            range 0 12
+            default 12
+            help
+                12dB ⇒ 量程约 0~3.1V。IPROPI 在 1.5A 时约 2.36V (但被钳位到 2.34V),
+                必须用 12dB 否则量程不够。
+
+        config FOCSTEP_R_IPROPI_OHM
+            int "R_IPROPI (Ω)"
+            default 3500
+            help
+                每片 DRV8874 一颗, 对地 1%。将 IPROPI 电流转成电压供 ADC 读取。
+
+        config FOCSTEP_A_IPROPI_UA_PER_A
+            int "A_IPROPI (µA/A)"
+            default 450
+            help
+                电流镜缩放系数。
+                ⚠️ DRV8874 数据手册**正文写 450、应用示例写 455**, 自相矛盾。
+                默认按正文 450; **上板用万用表比对后按实测标定**。
+
+        config FOCSTEP_ITRIP_MA
+            int "设计斩波阈值 ITRIP (mA)"
+            default 1500
+            help
+                由 VREF 分压 (10k+22k from 3.4V ⇒ 2.34V) 与 R_IPROPI 共同决定。
+                仅用于换算与自检提示, 固件不写 VREF。
+
+        config FOCSTEP_STALL_CURRENT_MA
+            int "堵转判定电流 (mA, 矢量幅值)"
+            default 1200
+            help
+                判据是**电流矢量幅值 √(ia²+ib²)** 的峰值, 持续超过本值 stall_ms
+                即判堵转/堵门。
+
+                ⚠️ 不要用单相瞬时值 —— 稳态下 ia=I·cosθ、ib=I·sinθ, 单相值随电角度在
+                0.707·I ~ I 之间摆动, 拿去比阈值会让"持续时间"条件永远凑不满,
+                一次都触发不了 (初版就是这么写的)。
+
+                ⚠️ 因为 VIPROPI 被钳位到 V_VREF, **实测上限约 1.49A**, 超过后读数
+                不再上升 ⇒ 只能判"到顶", 不能测幅值。故本值**必须 < ITRIP**。
+                整定方法: 先跑 normal 负载记录稳态峰值, 取其 1.5~2 倍。
+
+        config FOCSTEP_POS_TRUST_TOL_MRAD
+            int "位置可信度容差 (mrad)"
+            range 1 6283
+            default 30
+            help
+                深睡存盘时的单圈角与唤醒后读到的单圈角之差超过本值, 就判定
+                "睡着时被动过" ⇒ 多圈计数不可信, 需要回零。
+
+                默认 30 mrad ≈ 0.03 rad ≈ 0.005 圈。取小的理由是:
+                **误判为"没动"的代价 (冲错位置) 远大于误判为"动过" (多跑一次回零)**。
+
+                ⚠️ 根本歧义无法消除: 只有单圈绝对传感器, 分不清"动了 0.3 圈"与
+                "动了 1.3 圈" —— 单圈读数一样。所以只要超出容差就一律回零。
+
+        config FOCSTEP_HOME_TORQUE_MV
+            int "回零力矩 (mV)"
+            range 200 12000
+            default 800
+            help
+                ⚠️ **回零必须用小力矩** —— 以运行力矩顶机械限位会损坏机构。
+                注意"力小"和"速度慢"是两回事: 本实现限的是**电压上限** (决定力矩),
+                不是把速度调慢。慢速大力同样会顶坏东西。
+
+                ⚠️ **这个值还直接决定"电流抬升"判据有没有动态范围**:
+                  自由运行电流 ≈ 力矩 / 相电阻。以 R=1.2Ω 为例:
+                    1500mV → 1.25A, 到钳位 1.49A 只剩 1.19×  ⇒ 判据几乎不可用
+                     800mV → 0.67A, 余量 2.23×               ⇒ 良好
+                     600mV → 0.50A, 余量 2.98×               ⇒ 更好
+                所以**力矩越小, 接触检测越灵敏**, 同时还更保护机构 —— 两边同向。
+
+        config FOCSTEP_HOME_BASELINE_MS
+            int "自由运行电流基线采样时长 (ms)"
+            range 100 3000
+            default 400
+            help
+                开始逼近后先跑这么久, 取这段时间的电流峰值作为**基线**,
+                后续的"接触"靠"电流相对基线抬升"判定。
+                (对比: TMC2209 StallGuard 也必须绑定一个速度标定阈值)
+
+        config FOCSTEP_HOME_RISE_PCT
+            int "接触判据: 电流相对基线抬升 (%)"
+            range 110 400
+            default 160
+            help
+                电流峰值超过基线这么多即认为接触。默认 160% (1.6×)。
+                太小会被机构摩擦波动误触发; 太大则接触后要顶很久才判出。
+
+        config FOCSTEP_HOME_MIN_CURRENT_MA
+            int "基线可用下限 (mA)"
+            range 50 2000
+            default 150
+            help
+                基线低于本值就认为电流信号不可用 (未使能/标定错), 自动关掉
+                "电流抬升"判据, 只靠位置停滞判定。
+
+        config FOCSTEP_HOME_MAX_TRAVEL_MRAD
+            int "单次逼近最大行程 (mrad)"
+            range 1000 500000
+            default 60000
+            help
+                朝一端最多推多远就该碰到限位。超过即判 HOME_ERR_NO_CONTACT。
+                这个值必须**大于实际行程**, 但要尽量小 —— 它是失控时的保护。
+                60 rad ≈ 9.5 圈 (200步/转 的 42 步进)。
+
+        config FOCSTEP_HOME_BACKOFF_MRAD
+            int "接触后退避距离 (mrad)"
+            range 10 5000
+            default 300
+            help
+                碰到限位后往回退一点, 松开机械限位 —— 避免长期顶住导致变形/发热。
+
+        config FOCSTEP_HOME_CONFIRM_MS
+            int "接触确认时间 (ms)"
+            range 100 3000
+            default 500
+            help
+                "位置不再前进 **且** 电流抬升"需持续这么久才判定接触。
+                太小会被 PWM 周期抖动误触发; 太大则回零变慢。
+
+        config FOCSTEP_HOME_REPEAT_TOL_MRAD
+            int "重复性容差 (mrad)"
+            range 1 500
+            default 20
+            help
+                两次逼近的接触点之差超过本值即判 HOME_ERR_UNREPEATABLE。
+                **这一步不能省** —— 偏一步的基准会让机构永远偏, 而且现场很难发现。
+
+        config FOCSTEP_HOME_TIMEOUT_MS
+            int "单端回零总超时 (ms)"
+            range 2000 300000
+            default 30000
+
+        config FOCSTEP_STALL_MS
+            int "堵转判定持续时间 (ms)"
+            range 10 5000
+            default 300
+
+    endmenu
+
+    menu "母线电压采样"
+
+        config FOCSTEP_VBUS_DIVIDER_NUM
+            int "分压比分子 (下臂, Ω)"
+            default 8200
+
+        config FOCSTEP_VBUS_DIVIDER_DEN
+            int "分压比分母 (上臂+下臂, Ω)"
+            default 108200
+            help
+                100k + 8.2k ⇒ 比值 = 8.2/(100+8.2) = 0.0758。
+                24V→1.82V, 30V→2.27V, 36V→2.73V。
+
+        config FOCSTEP_VBUS_GATE_SETTLE_MS
+            int "门控导通后等待 (ms)"
+            range 1 20
+            default 2
+            help
+                源阻抗 7.6kΩ × 10nF ⇒ τ=76µs。取 2ms 远大于 5τ, 保证建立完成。
+                ⚠️ 门控只允许做在**高边**。若开关串在 8.2k 下方, 关断时上臂会把
+                ADC 节点抬到 VM 电位 (24V), 超引脚耐压并有损伤风险。
+
+        config FOCSTEP_VBUS_GATE_ACTIVE_HIGH
+            bool "门控高有效"
+            default y
+            help
+                GPIO7 输出高 = P-MOS 导通 = 分压接入。
+                ⚠️ 配错会导致常态耗 5.3mW, 推翻 0.25mW 待机基线。
+                上板第一件事: 门控关断时量 ADC 节点应为 0V (被 8.2k 拉到地)。
+
+        config FOCSTEP_VBUS_MIN_ENABLE_MV
+            int "禁止使能电机的母线下限 (mV)"
+            default 6000
+            help
+                §10.4 安全逻辑①: VM < 6V 禁止使能电机
+                (USB 单独供电时 VM≈4.6V, 逼近 DRV8874 的下限 4.5V)。
+
+        config FOCSTEP_VBUS_OVERVOLT_MV
+            int "过压上报阈值 (mV)"
+            default 30000
+
+    endmenu
+
+    menu "CAN 总线"
+
+        config FOCSTEP_CAN_ENABLE
+            bool "启用 CAN"
+            default y
+
+        config FOCSTEP_CAN_BITRATE
+            int "CAN 波特率 (bit/s)"
+            default 500000
+            help
+                ⚠️ **docs/doc.md 全文未提及 CAN 波特率** —— 这是本次新增的占位项。
+                默认 500k (工业控制常用)。定稿前请确认。
+
+        config FOCSTEP_CAN_NO_ACK
+            bool "TWAI 无 ACK 模式 (单板 bring-up)"
+            default n
+            help
+                打开后 TWAI 进入 NO_ACK 模式: 总线上没有其他节点回 ACK 时也能发出帧。
+                **只在单板台上调试时打开** —— 正式组网必须关掉, 否则总线错误计数不生效、
+                丢帧检测失去意义。
+
+        config FOCSTEP_CAN_NODE_ID
+            int "本节点 CAN ID 基址"
+            range 1 2047
+            default 16
+
+        config FOCSTEP_CAN_TIMEOUT_MS
+            int "CAN 丢帧超时 (ms)"
+            range 100 60000
+            default 3000
+            help
+                §10.4 安全逻辑④: 超时未收到主站帧 ⇒ 上报故障码 4。
+                不影响本地控制 (手拉助动仍然工作)。
+
+    endmenu
+
+    menu "指示灯"
+
+        config FOCSTEP_WS2812_ENABLE
+            bool "启用 WS2812"
+            default y
+
+        config FOCSTEP_WS2812_BRIGHTNESS
+            int "亮度 (0~255)"
+            range 0 255
+            default 32
+            help
+                ⚠️ **禁全白**: 单颗全白约 60mA, 会瞬间拉垮 Buck。
+                默认 32 已足够看清。
+
+    endmenu
+
+    menu "联网与 OTA"
+
+        config FOCSTEP_WIFI_ENABLE
+            bool "启用 Wi-Fi 控制面 (HTTP/OTA)"
+            default n
+            help
+                睡眠态不启用 (会打破深睡)。仅在平台态调试时打开。
+
+        config FOCSTEP_WIFI_SSID
+            string "Wi-Fi SSID"
+            default ""
+            help
+                凭据**不进版本库**。真实值写在 sdkconfig.defaults.local
+                (已 gitignore, 由 CMakeLists.txt 自动追加)。
+
+        config FOCSTEP_WIFI_PASSWORD
+            string "Wi-Fi 密码"
+            default ""
+
+    endmenu
+
+    menu "低功耗与唤醒"
+
+        config FOCSTEP_WAKE_ON_ENCODER
+            bool "编码器 INT 唤醒 (ext1)"
+            default y
+            help
+                KTH5701 INT 接 GPIO3 (LP 域)。数据手册: 高有效、**锁存**,
+                **读一次数据即清零**。⇒ ext1 配 ESP_EXT1_WAKEUP_ANY_HIGH。
+                ⚠️ 若上板实测"读数据不清 INT", 则必须改走轮询, 深睡档不成立 ——
+                这是 §10.3 的地基, 见上板自检第 10 项。
+
+        config FOCSTEP_DEEP_SLEEP_ENABLE
+            bool "允许进入深睡"
+            default y
+
+    endmenu
+
+    menu "调试"
+
+        config FOCSTEP_PLATFORM_CONSOLE_ENABLE
+            bool "启用平台自检命令台"
+            default y
+            help
+                注册**平台级**自检命令: id / regs / status / xyz / circle / cal /
+                vref / brake / jog / align / char / ipropi / stall / vbus / gate /
+                int / sleep。
+                这些命令是硬件 bring-up 用的, 与具体应用无关。
+
+                应用自己的命令在应用层用 platform_console_register() 注册,
+                由应用的 Kconfig 单独开关。
+
+        config FOCSTEP_LOG_LEVEL_VERBOSE
+            bool "平台层详细日志"
+            default n
+
+    endmenu
+endmenu

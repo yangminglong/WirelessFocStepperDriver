@@ -1,0 +1,11 @@
+dependencies:
+  idf: ">=5.0"
+  # FOC 电机控制。传递拉入 arduino-foc (SimpleFOC v2.4.0 移植) + iqmath + i2c_bus
+  espressif/esp_simplefoc: "^1.4.1"
+  # WS2812 底层 (RMT) + 闪灯模式引擎
+  espressif/led_strip: "^3.0.0"
+  espressif/led_indicator: "^2.1.2"
+  # 板载按键: 消抖 + 短按/长按事件
+  espressif/button: "^4.2.1"
+  # 局域网发现 (OTA 页面)
+  espressif/mdns: "^1.12.0"

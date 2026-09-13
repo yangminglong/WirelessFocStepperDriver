@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.0"
+  # 托管组件 (esp_simplefoc / led_strip / led_indicator / button / mdns)
+  # 现在声明在**平台组件**里 (components/focstep_platform/idf_component.yml),
+  # 应用层不再关心它们 —— 换项目时不必重复声明。

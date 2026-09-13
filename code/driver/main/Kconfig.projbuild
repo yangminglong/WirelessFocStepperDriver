@@ -1,0 +1,57 @@
+# 推拉门应用配置 —— 每个项目一份
+#
+# **平台层参数在 components/focstep_platform/Kconfig** (电机/传感器/通信/电源硬件/OTA)。
+# 本文件只放**这个应用特有**的策略参数。
+
+menu "FocStepper 推拉门应用"
+
+    menu "低功耗策略"
+
+        config FOCSTEP_RECEIVER_ID
+            hex "本板 receiver_id"
+            default 0x1
+            help
+                PA 载荷寻址用。0 在协议里表示广播给所有板, 故本板 ID 不可为 0。
+
+        config FOCSTEP_IDLE_TO_SLEEP_MS
+            int "无动作后进入深睡的时间 (ms)"
+            range 1000 600000
+            default 10000
+
+        config FOCSTEP_WAKE_HOLD_MS
+            int "唤醒接管保持时间 (ms)"
+            range 500 60000
+            default 5000
+            help
+                手拉唤醒后维持"唤醒接管"态 (nSLEEP 高、编码器 25Hz) 的时长。
+                超时无进一步动作则回深睡。
+
+        config FOCSTEP_ASSIST_TORQUE
+            string "手拉助动力矩 (V, 浮点)"
+            default "2.0"
+            help
+                唤醒接管态下跟随手拉方向的助动力矩。
+                ⚠️ **从 0.5V 起逐步上调**, 直接给大值会有冲击/异响。
+
+    endmenu
+
+    menu "应用命令台"
+
+        config FOCSTEP_CONSOLE_ENABLE
+            bool "启用串口应用命令台"
+            default y
+            help
+                注册应用级命令 (home/learn/pos/open/close/stop 等)。
+                平台级自检命令 (id/regs/xyz/ipropi/brake/vref) 由
+                FOCSTEP_PLATFORM_CONSOLE_ENABLE 单独控制, 与本节无关。
+
+        config FOCSTEP_LOG_VERBOSE
+            bool "FOC 循环级日志"
+            default n
+            help
+                ⚠️ 打开会显著拖慢 1kHz FOC 循环。
+                只在定位瓶颈时短时打开。
+
+    endmenu
+
+endmenu
