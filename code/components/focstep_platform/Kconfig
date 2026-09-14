@@ -113,22 +113,23 @@ menu "FocStepper 平台层"
                 **不要指望更高** —— 再快也是被 I2C 卡住, 只会让 loopFOC 超时抖动。
 
         config FOCSTEP_PHEN_SWAPPED
-            bool "交换 EN/PH 引脚 (上板裁决项)"
+            bool "交换 EN/PH 引脚 (仅原理图接反时救回)"
             default n
             help
-                ⚠️ **这是必须上板裁决的一项。**
+                ⚠️ **正常打样不需要打开。**
 
-                DRV8874 数据手册的引脚名是 EN/IN1 和 PH/IN2 (EN 在 IN1 上);
-                而 docs/doc.md §四 的引脚表把 GPIO10 标成 "IN2(EN)"、GPIO11 标成 "IN1(PH)",
-                两者交叉。文档没说清是按引脚名还是按功能标。
+                docs/doc.md v0.7 已定线: DRV8874 引脚名即 EN/IN1、PH/IN2,
+                **EN 在 IN1 脚上、PH 在 IN2 脚上**; 本板 GPIO10/14 = IN1(EN)、
+                GPIO11/15 = IN2(PH)。默认分支与原理图一致。
 
-                PH/EN 模式下**只有 EN=0 是 Brake**。若认反了, "先切 brake"会变成
-                "EN 仍为 1、PH=0" = 满压反转驱动 —— 唤醒瞬间猛冲。
+                PH/EN 模式下**只有 EN=0 是 Brake**。若原理图把两根接反,
+                "先切 brake"会变成 "EN 仍为 1、PH=0" = 满压反转驱动 —— 唤醒瞬间猛冲。
 
-                默认(关)  = GPIO10=EN、GPIO11=PH (按功能标注)
-                打开       = GPIO11=EN、GPIO10=PH (按引脚名标注)
+                默认(关) = EN 认在 IN1 = GPIO10/14 (与原理图一致)
+                打开     = EN 认在 IN2 = GPIO11/15 (接反救回, 不必重画板)
 
-                裁决方法: 两相 EN 全拉低后用手转轴, 应有明显阻尼且电机不主动转。
+                验线方法: `brake` 命令 → 两相 EN 拉低后手转轴,
+                应有明显阻尼且电机不主动转。
 
         config FOCSTEP_MOTION_DOWNSAMPLE
             int "位置/速度环降频比 (FOC 周期数)"
@@ -172,15 +173,10 @@ menu "FocStepper 平台层"
                 机械零位到电气零位的偏移。initFOC() 会自动对齐电气角,
                 本项只用于让 sensor 的 0 对准机构 0 (推拉门的"全关"位置)。
 
-        config FOCSTEP_ENCODER_MIN_ANGLE
-            string "机械行程下限 (rad, 浮点)"
-            default "0.0"
-
-        config FOCSTEP_ENCODER_MAX_ANGLE
-            string "机械行程上限 (rad, 浮点)"
-            default "6.28318530718"
-            help
-                上下限一起定义限位。上电自学习会根据实际行程覆盖 (存 NVS)。
+        # ⚠️ 这里原来有 ENCODER_MIN/MAX_ANGLE 两个占位行程角, 已删除:
+        #    行程现在只有**标定**一个来源 (零点 + 满行程点, 存 NVS), 未标定时
+        #    foc_motor_move_to() 直接拒绝执行 —— 占位角与真实机构无关,
+        #    照它跑等于用错误基准冲机械限位。
 
         config FOCSTEP_ENCODER_WAKE_DIFF
             hex "Wake-up&Sleep 变化阈值寄存器值"
@@ -340,6 +336,37 @@ menu "FocStepper 平台层"
             range 2000 300000
             default 30000
 
+        config FOCSTEP_HOME_RETRY
+            int "标定失败重试次数"
+            range 0 5
+            default 1
+            help
+                **两端标定** (`learn both` / 自动标定) 一次失败后重跑几轮, 0 = 不重试。
+                默认 1 (最多做两轮): 偶发的接触判据抖动值得再试一次, 但**重试也不能多** ——
+                每轮都会让门顶两次机械限位, 轮数多只增加磨损, 不会让卡住的机构变通。
+                只测不改行程的命令 (`home`) 与只写不动的落定 (`learn zero|end` / `mark`) 不重试:
+                前者没有"成功"可言, 后者不动电机, 都没有可重试的东西。
+
+        config FOCSTEP_HOME_AUTO_INVERTED
+            bool "自动标定: 零点在正端 (反装机构)"
+            default n
+            help
+                自动标定是**无人值守**的, 没人能告诉它"哪一侧是零点" ——
+                而标定前"哪一侧是零点"恰恰是**待求量**, 推不出来 ⇒ 只能配。
+                默认 n = 零点在负端 (常规安装, 等价 `learn both neg`)。
+                反装机构 (零点的角度比满行程点更大) 打开本项 = `learn both pos`。
+                人在现场时不必动它, 直接敲 `learn both pos|neg` 更清楚。
+
+        config FOCSTEP_HOME_AUTO_ENABLE
+            bool "允许无人值守自动标定"
+            default n
+            help
+                ★ 默认**关**。打开它意味着固件可以在**没有任何人在场**的情况下让门自己
+                跑到底顶机械限位 —— 装歪、卡住、有人扶着门时都可能出事实伤害。
+                所以出厂必须关, 由现场人员确认机构通畅后再打开 (或运行时用
+                homing_set_policy() 授权)。手动命令 (`learn` / `mark`) 不受本项限制:
+                那是人在现场下发的。
+
         config FOCSTEP_STALL_MS
             int "堵转判定持续时间 (ms)"
             range 10 5000
@@ -474,9 +501,105 @@ menu "FocStepper 平台层"
                 ⚠️ 若上板实测"读数据不清 INT", 则必须改走轮询, 深睡档不成立 ——
                 这是 §10.3 的地基, 见上板自检第 10 项。
 
-        config FOCSTEP_DEEP_SLEEP_ENABLE
-            bool "允许进入深睡"
+        config FOCSTEP_PA_WAKE_ENABLE
+            bool "无线唤醒接收 (BLE 周期广播 / PA)"
+            depends on BT_ENABLED
             default y
+            help
+                把 PA 接收端编进固件: 驱动板可被无线发送端远程唤醒/开/关/停。
+                实测成本模型 I_RX = f + 0.160/T (C6, 见 tests/ble_sync), 详见
+                code/README.md §13。
+
+                ⚠️ 三件事必须一起看:
+                  · 会引入 BLE 协议栈 (flash/RAM 增量)。上板前用 `idf.py size`
+                    核对仍能装进 TWO_OTA_LARGE 分区。
+                  · **与 FOCSTEP_SLEEP_MODE_LIGHT 互斥** —— 监听期必须让 BLE
+                    控制器自己排唤醒 (PM 自动轻睡), 显式 esp_light_sleep_start()
+                    与它不共存 (IDF 对"BT 未停时手动轻睡"是受限用法)。
+                  · 板级硬前提: **32.768kHz 晶振** + `RTC_CLK_SRC_EXT_CRYS=y`
+                    (sdkconfig) + `BT_LE_LP_CLK_SRC_DEFAULT=y`。少了它们要么
+                    同步不稳, 要么白丢 3.33mA。
+
+        config FOCSTEP_PA_WAKE_T_MS
+            int "无线唤醒周期 T (ms, 上电期望值)"
+            range 100 60000
+            default 500
+            help
+                监听端的"功耗-时延"旋钮: T = per_adv_ival × (skip+1), 最坏响应 ≈ T。
+                实际值只能落在发射端间隔的整数倍上 (发射端 240ms 时, T=500 实得 480ms),
+                命令 `wake status` 会打印实得值。
+                ⚠️ 发送端可用 SET_T 指令动态改 (它的陀螺仪快/慢档), 这里只是上电初值。
+
+        config FOCSTEP_PA_TICK_MS
+            int "监听期主循环节拍 (ms)"
+            range 50 5000
+            default 1000
+            help
+                监听期主循环周期。⚠️ **不能沿用 100ms**: 每次唤醒都要付 BLE 控制器
+                固定的轻睡退出开销 (实测常数 ~3.2ms × ~50mA), 100ms 节拍会把省电全吃掉。
+                代价: 监听期本地手拉唤醒的检测延迟 ≤ 本值 (可用 GPIO 中断改善, 待验证)。
+
+        config FOCSTEP_PA_SCAN_WINDOW_MS
+            int "发现扫描的窗口 (ms, 快扫相位)"
+            range 10 1000
+            default 60
+            help
+                ⚠️ 发现期扫描必须**限占空比**: 若把 window 设成等于 interval (=100%),
+                发射端不在场时就是射频常开 (~84mA), 把监听期的省电全部吃掉。
+                实测占空比 = window/interval 即为平均电流的倍数基准。
+
+        config FOCSTEP_PA_SCAN_INTERVAL_MS
+            int "发现扫描的间隔 (ms, 快扫相位)"
+            range 20 5000
+            default 300
+
+        config FOCSTEP_PA_SCAN_FAST_MS
+            int "快扫持续时长 (ms), 超时转慢扫"
+            range 2000 600000
+            default 30000
+            help
+                发射端在场时几十毫秒就能发现, 所以先快扫一段时间保证响应;
+                超时说明对端不在, 转"慢扫"(30ms/10000ms ≈ 0.3%, 亚 mA 级),
+                之后发现延迟变长但不再烧电。
+
+        config FOCSTEP_SLEEP_ENABLE
+            bool "允许进入睡眠档 (PS_SLEEP)"
+            default y
+            help
+                允许主循环在 PS_SLEEP 态让 MCU 睡下去。关掉只用于台面调试
+                (例如要一直连着串口看日志、或反复打断睡眠做测量)。
+                用哪种睡眠由下面 FOCSTEP_SLEEP_MODE 决定。
+
+        choice FOCSTEP_SLEEP_MODE
+            prompt "睡眠档的 MCU 模式"
+            default FOCSTEP_SLEEP_MODE_DEEP
+            help
+                板级"深睡"(power_state = PS_SLEEP) 用哪种 MCU 睡眠实现。
+                两者对 nSLEEP / CAN Rs / WS2812 三根控制脚的**取值要求完全相同**,
+                差别全在 MCU 侧 (docs/doc.md §5.6 / §10.3):
+
+                - DeepSleep: 功耗最低 (~10µA), 唤醒即复位 ⇒ 从 app_main 重跑,
+                  位置靠 NVS 恢复; GPIO 浮空 ⇒ 靠外部上下拉维持安全电平。
+                - LightSleep: 唤醒不复位 (GPIO 保持、RAM 保留、唤醒快),
+                  **但待机电流高于 DeepSleep ⇒ §六 的 0.25mW 口径要按实测重算**。
+                  代码侧另有两条硬要求 (已实现, 见 foc_motor.h / wakeup.h):
+                    · 醒来必须**读一次编码器数据清 INT 锁存**, 否则被同一次中断立刻重复唤醒;
+                    · 唤醒后要重做"位置是否可信"判定 (睡着期间可能被手拉动)。
+
+            config FOCSTEP_SLEEP_MODE_DEEP
+                bool "DeepSleep (功耗最低, 唤醒即复位)"
+
+            config FOCSTEP_SLEEP_MODE_LIGHT
+                bool "LightSleep (唤醒不复位, GPIO 保持)"
+                depends on !FOCSTEP_PA_WAKE_ENABLE
+                help
+                    ⚠️ 与无线唤醒接收 (FOCSTEP_PA_WAKE_ENABLE) 互斥:
+                    PA 监听期必须让 BLE 控制器自己排唤醒窗口 (PM 自动轻睡),
+                    而本档走的是显式 esp_light_sleep_start(), 两者不共存
+                    (IDF 对"BT 未停时手动轻睡"是受限用法)。
+                    要用无线唤醒就保持 DeepSleep 档, 监听期由 app_main 的
+                    "监听档"分支负责不进显式睡眠。
+        endchoice
 
     endmenu
 

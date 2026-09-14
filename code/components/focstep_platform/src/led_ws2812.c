@@ -63,8 +63,8 @@ static const blink_step_t s_st_white[] = {
 };
 
 /* 故障闪码: 亮 120ms / 灭 200ms 重复 N 次, 然后长灭 1200ms 再循环。
- * docs/doc.md §10.4 的故障码 1~6 各一条 (N = 故障码)。
- * 每条的重复次数不同, 无法用同一个宏参数化, 故显式写 6 条。 */
+ * docs/doc.md §10.4 的故障码 1~7 各一条 (N = 故障码)。
+ * 每条的重复次数不同, 无法用同一个宏参数化, 故显式写 7 条。 */
 static const blink_step_t s_st_fault1[] = {
     {LED_BLINK_RGB, RGB_RED, 0}, {LED_BLINK_HOLD, LED_STATE_ON, 120},
     {LED_BLINK_HOLD, LED_STATE_OFF, 200},
@@ -117,6 +117,19 @@ static const blink_step_t s_st_fault6[] = {
     {LED_BLINK_LOOP, 0, 0},
 };
 
+static const blink_step_t s_st_fault7[] = {
+    {LED_BLINK_RGB, RGB_RED, 0},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_ON, 120}, {LED_BLINK_HOLD, LED_STATE_OFF, 200},
+    {LED_BLINK_HOLD, LED_STATE_OFF, 1200},
+    {LED_BLINK_LOOP, 0, 0},
+};
+
 static blink_step_t const *s_blink_lists[] = {
     [LED_IDX_OFF]         = s_st_off,
     [LED_IDX_DIM]         = s_st_dim,
@@ -130,6 +143,7 @@ static blink_step_t const *s_blink_lists[] = {
     [LED_IDX_FAULT4]      = s_st_fault4,
     [LED_IDX_FAULT5]      = s_st_fault5,
     [LED_IDX_FAULT6]      = s_st_fault6,
+    [LED_IDX_FAULT7]      = s_st_fault7,
 };
 
 static led_indicator_handle_t s_led = NULL;
@@ -202,7 +216,7 @@ esp_err_t led_set_color(led_color_t color)
 
 void led_show_fault_code(uint8_t code)
 {
-    if (code < 1 || code > 6) {
+    if (code < 1 || code > 7) {
         code = 1;
     }
     led_set_color((led_color_t)(LED_IDX_FAULT1 + (code - 1)));

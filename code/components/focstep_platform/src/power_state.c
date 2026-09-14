@@ -83,14 +83,26 @@ static void enter_state(power_state_t st)
     switch (st) {
     case PS_SLEEP:
         /* 顺序: 停运动 → 电机断电(nSLEEP 低, VREF 随之归零) → CAN 睡眠
-         *       → 编码器转低功耗档 */
+         *       → 编码器转低功耗档 → (轻睡档) 暂停 FOC 任务 */
         foc_motor_stop();
         nsleep_set(false);
         can_set_active(false);
         foc_motor_encoder_set_mode(ENC_CMD_WAKEUP_SLEEP);
+#if CONFIG_FOCSTEP_SLEEP_MODE_LIGHT || CONFIG_FOCSTEP_PA_WAKE_ENABLE
+        /* 需要"系统能真正 idle"的两档都要暂停 FOC 任务:
+         *   · 轻睡档 (显式 esp_light_sleep_start): 否则 1kHz 任务让系统永远不闲;
+         *   · 无线监听档 (PA + PM 自动轻睡): 同上, 而且它是长驻的那一档。
+         * 顺带解决另一面: 醒来时 vTaskDelayUntil 会追打时间基 (暂停时已置 resync)。
+         * ⚠️ 暂停必须是**协作式**的 —— 见 foc_motor_pause_loop 的注释 (I2C 锁)。 */
+        foc_motor_pause_loop();
+#endif
         break;
 
     case PS_ACTIVE:
+#if CONFIG_FOCSTEP_SLEEP_MODE_LIGHT || CONFIG_FOCSTEP_PA_WAKE_ENABLE
+        /* 先把被暂停的 FOC 任务放回来 (它恢复时会自动重置时间基) */
+        foc_motor_resume_loop();
+#endif
         /* 编码器先切连续档 (否则读不到角度), 再使能电机 */
         foc_motor_encoder_set_mode(ENC_CMD_CONTINUOUS);
         nsleep_set(true);

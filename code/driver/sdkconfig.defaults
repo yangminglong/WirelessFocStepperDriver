@@ -29,7 +29,11 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n
 
 # ---- 电源管理与 tickless ----
-# 深睡是主路径, 但运行/唤醒接管态也希望空闲时能自动轻睡。
+# ⚠️ 这两项**不会**自动开启轻睡: 还得调 esp_pm_configure({light_sleep_enable=true})
+# 才会在空闲时自动轻睡。本工程**故意不启用自动轻睡** —— 1kHz 的 FOC 任务对时序敏感,
+# "睡不睡"要由 PS_SLEEP 状态决定 (显式 esp_light_sleep_start(), 见 code/README.md §12),
+# 不能是"谁闲着就睡"。保留 PM_ENABLE + tickless idle 是为了运行态降频/空闲,
+# 以及将来真要开自动轻睡时不必改配置。
 CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
@@ -61,8 +65,33 @@ CONFIG_PARTITION_TABLE_TWO_OTA_LARGE=y
 # ⚠️ 日志会占 CPU 与串口时间。默认 INFO; 定位 FOC 循环瓶颈时再临时开 DEBUG。
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# ---- 无线唤醒接收 (BLE 周期广播 / PA) ----
+# 依据 tests/ble_sync 的接收端归档配置 (configs/sdkconfig.defaults.sync-c6)。
+# ⚠️ C6 用的是**新控制器**, 符号是 BT_LE_* / BT_NIMBLE_*;
+#    写成旧控制器的 BT_CTRL_*/BTDM_* 会被 Kconfig **静默忽略**(不报错)。
+# ⚠️ 改完必须 `rm -f sdkconfig` 再 build —— 已存在的 sdkconfig 不会回灌 defaults。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# 只做观察者 (被动扫描 + 周期同步); 其余角色关掉省 flash/RAM
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+CONFIG_BT_NIMBLE_EXT_ADV=y            # 拉入扩展扫描 + 周期同步支持
+CONFIG_BT_NIMBLE_MAX_PERIODIC_SYNCS=1
+# 低功耗三件套:
+#  · BT_LE_SLEEP_ENABLE: 缺它只有 modem sleep, 控制器根本不休眠
+#  · RTC_CLK_SRC_EXT_CRYS: 板载 32.768kHz 晶振 (doc §5.5)。**不选它 RTC 慢时钟
+#    就是内部 RC**: 既拿不到 ±20ppm, 也让下面那项失去意义
+#  · BT_LE_LP_CLK_SRC_DEFAULT: BLE 低功耗时钟"跟随系统 RTC 慢时钟" = 上面那颗晶振。
+#    比 MAIN_XTAL 省 3.33mA (实测), 且是控制器肯放开 NO_LIGHT_SLEEP 锁的前提
+CONFIG_BT_LE_SLEEP_ENABLE=y
+CONFIG_RTC_CLK_SRC_EXT_CRYS=y
+CONFIG_BT_LE_LP_CLK_SRC_DEFAULT=y
+CONFIG_PM_DFS_INIT_AUTO=y
+
 # ---- BW20 (省 flash / RAM) ----
-CONFIG_BT_ENABLED=n
 CONFIG_ESP_WIFI_ENABLED=n
 
 # ---- 堆 ----

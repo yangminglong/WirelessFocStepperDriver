@@ -17,6 +17,14 @@
  *
  * ⚠️ 本发送端**不保证送达**(PA 是单向链路, 无 ACK)。靠 Kconfig 的
  *    SENDER_REPEAT 重复发送换可靠性 —— 比 PAwR 便宜得多。
+ *    ⚠️ 重复帧必须**共用同一个 sequence**(见 s_seq 的注释), 否则接收端会把
+ *       N 帧都当新指令 ⇒ 同一条 OPEN 执行 N 次。
+ *
+ * ── T 策略 (v2 新增) ──────────────────────────────────────────
+ *   载荷 v2 加了 `arg` 字段与 FOC_DOOR_CMD_SET_T: 发送端可以动态改接收端的
+ *   唤醒周期 T (接收端 T = per_adv_ival×(skip+1), 由它自己换算成 skip)。
+ *   策略: 被运动唤醒 → T=SENDER_T_ACTIVE_MS(快响应); 倒计时无动作 → T_IDLE(省电)。
+ *   ⚠️ 改 T **没有回执** —— 只能到接收端本地用 `wl status` 看实得值。
  *
  * ⚠️ 载荷**未加密**(EAD 未做)。receiver_id/session/sequence 只能防误触发,
  *    不能防伪造。量产前必须补。
@@ -31,6 +39,7 @@
 #include "esp_bt.h"
 #include "esp_console.h"
 #include "esp_timer.h"
+#include "driver/gpio.h" /* 运动检测输入 (陀螺仪 INT, 见 SENDER_MOTION_GPIO) */
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,7 +52,7 @@
 #include "host/ble_hs_adv.h"
 #include "services/gap/ble_svc_gap.h"
 
-#include "foc_link_protocol.h"
+#include "foc_door_link.h" /* 应用层指令集 (内含承载层 foc_link_protocol.h) */
 
 static const char *TAG = "PA_TX";
 
@@ -52,16 +61,31 @@ static const char *TAG = "PA_TX";
 
 static uint8_t s_own_addr_type;
 static bool s_started = false;
-static uint16_t s_sequence = 0;
 static uint8_t s_session = 1;
-static uint8_t s_pending_cmd = FOC_LINK_CMD_NONE;
+static uint8_t s_pending_cmd = FOC_DOOR_CMD_NONE;
+static uint16_t s_pending_arg = 0;
+static uint16_t s_pending_seq = 0; /* 这条指令的序号 (N 个重复帧共用) */
 static int s_repeat_left = 0;
+
+/* ⚠️ 序号语义 (v2 收紧): **一条逻辑指令一个序号**, 重复发的 N 帧共用同一个。
+ * 早期实现每发一帧就 ++, 于是接收端的去重逻辑 (session+sequence 严格递增)
+ * 会把 N 帧都判成"新指令" ⇒ 同一条 OPEN 被执行 N 次、唤醒流程走 N 遍。
+ * 现在: 接收端第 2..N 帧判 DUP 丢弃 ⇒ "重复换可靠性"才真正成立。 */
+static uint16_t s_seq = 0;
+
+/* ── 运动驱动的 T 策略 (陀螺仪可插拔) ──────────────────────────
+ * 被运动唤醒 → T 调小 (快响应); 倒计时内无新动作 → T 调回 (省电)。
+ * 陀螺仪硬件未上时用命令台 `motion` 模拟; 接上后把它的 INT 接到
+ * SENDER_MOTION_GPIO 即可 (轮询电平, 20Hz 足够判"有人动了")。 */
+static bool s_motion_active = false;
+static bool s_t_auto = true;
+static TickType_t s_motion_since = 0;
 
 void ble_store_config_init(void);
 
 /* ------------------------------------------------------------------ */
 
-static void build_payload(uint8_t *out, uint8_t cmd)
+static void build_payload(uint8_t *out, uint8_t cmd, uint16_t seq, uint16_t arg)
 {
     foc_link_pkt_t pkt;
     memset(&pkt, 0, sizeof(pkt));
@@ -71,7 +95,8 @@ static void build_payload(uint8_t *out, uint8_t cmd)
     pkt.receiver_id = CONFIG_SENDER_RECEIVER_ID;
     pkt.cmd = cmd;
     pkt.session = s_session;
-    pkt.sequence = ++s_sequence;
+    pkt.sequence = seq;
+    pkt.arg = arg; /* SET_T 时 = 目标 T (ms); 其余指令填 0 */
     /* nonce 每次变化 —— 为将来的 EAD/防重放预留, 现在只用来区分包 */
     pkt.nonce = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFF);
 
@@ -80,10 +105,10 @@ static void build_payload(uint8_t *out, uint8_t cmd)
 
 /* 更新周期广播数据。**可以在广播进行中调用** —— 这是 PA 发指令的方式:
  * 广播本身不停, 只换载荷。 */
-static esp_err_t update_periodic_data(uint8_t cmd)
+static esp_err_t update_periodic_data(uint8_t cmd, uint16_t seq, uint16_t arg)
 {
     uint8_t payload[FOC_LINK_PKT_LEN];
-    build_payload(payload, cmd);
+    build_payload(payload, cmd, seq, arg);
 
     struct os_mbuf *data = os_msys_get_pkthdr(sizeof(payload), 0);
     ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_NO_MEM, TAG, "os_msys_get_pkthdr failed");
@@ -157,7 +182,8 @@ static void start_periodic_adv(void)
     assert(rc == 0);
 
     /* 起始载荷 = 心跳 (CMD_NONE) */
-    ESP_ERROR_CHECK(update_periodic_data(FOC_LINK_CMD_NONE));
+    s_seq++;
+    ESP_ERROR_CHECK(update_periodic_data(FOC_DOOR_CMD_NONE, s_seq, 0));
 
 #if MYNEWT_VAL(BLE_PERIODIC_ADV_ENH)
     rc = ble_gap_periodic_adv_start(ADV_INSTANCE, &eparams);
@@ -201,17 +227,20 @@ static void host_task(void *param)
 /* ------------------------------------------------------------------ */
 /* 指令派发: 一条指令重复发 N 次 (PA 无 ACK, 靠重复换可靠性)            */
 
-static void request_command(uint8_t cmd)
+static void request_command(uint8_t cmd, uint16_t arg)
 {
-    const char *name = foc_link_cmd_name(cmd);
+    const char *name = foc_door_cmd_name(cmd);
     if (!s_started) {
         printf("PA 还没起来, 稍后再试\n");
         return;
     }
     s_pending_cmd = cmd;
+    s_pending_arg = arg;
     s_repeat_left = CONFIG_SENDER_REPEAT;
-    printf("已排队指令 %s, 将重复 %d 次 (每次间隔 %dms)\n",
-           name, CONFIG_SENDER_REPEAT, CONFIG_SENDER_PA_ITVL_MS);
+    /* ★ 一条逻辑指令一个序号: N 个重复帧共用, 接收端只认第一帧 */
+    s_pending_seq = ++s_seq;
+    printf("已排队 %s (arg=%u) 序号=%u, 重复 %d 次 × %d ms\n",
+           name, arg, s_pending_seq, CONFIG_SENDER_REPEAT, CONFIG_SENDER_PA_ITVL_MS);
 }
 
 /* 每 50ms 跑一次: 推进重复计数, 发完就回到心跳 */
@@ -225,15 +254,60 @@ static void dispatch_tick(void)
     if (now < next_us) {
         return;
     }
-    /* 按 PA 间隔推, 保证每个周期事件带上不同载荷 */
+    /* 按 PA 间隔推, 保证每个周期事件都带上这条指令 (载荷不同 => 每个周期都发新的) */
     next_us = now + (int64_t)CONFIG_SENDER_PA_ITVL_MS * 1000;
 
-    if (update_periodic_data(s_pending_cmd) == ESP_OK) {
+    if (update_periodic_data(s_pending_cmd, s_pending_seq, s_pending_arg) == ESP_OK) {
         s_repeat_left--;
         if (s_repeat_left == 0) {
-            s_pending_cmd = FOC_LINK_CMD_NONE;
+            s_pending_cmd = FOC_DOOR_CMD_NONE;
+            s_pending_arg = 0;
+            s_seq++;
+            update_periodic_data(FOC_DOOR_CMD_NONE, s_seq, 0);
             ESP_LOGI(TAG, "指令发送完毕, 回到心跳");
         }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 运动驱动的 T 策略                                                    */
+
+/* 自动策略: 运动 → T_ACTIVE; 静止 hold 时间 → T_IDLE。
+ * 手动 `t <ms>` 会关掉自动 (`t auto` 恢复)。 */
+static void policy_apply_t(uint32_t t_ms, const char *why)
+{
+    ESP_LOGI(TAG, "T → %u ms (%s)", (unsigned)t_ms, why);
+    request_command(FOC_DOOR_CMD_SET_T, (uint16_t)t_ms);
+}
+
+static void policy_on_motion(void)
+{
+    s_motion_since = xTaskGetTickCount();
+    if (!s_t_auto || s_motion_active) {
+        return;
+    }
+    s_motion_active = true;
+    ESP_LOGI(TAG, "检测到运动 (陀螺仪/模拟)");
+    policy_apply_t(CONFIG_SENDER_T_ACTIVE_MS, "运动");
+}
+
+static void policy_tick(void)
+{
+    /* 运动检测输入: 接上陀螺仪 INT 后, 电平变高即视为"有人动了"。
+     * 未接 (GPIO<0) 时只靠命令台 `motion` 模拟。 */
+#if CONFIG_SENDER_MOTION_GPIO >= 0
+    static int last_level = 0;
+    int lvl = gpio_get_level((gpio_num_t)CONFIG_SENDER_MOTION_GPIO);
+    if (lvl && !last_level) {
+        policy_on_motion();
+    }
+    last_level = lvl;
+#endif
+
+    if (s_t_auto && s_motion_active &&
+        (xTaskGetTickCount() - s_motion_since) > pdMS_TO_TICKS(CONFIG_SENDER_MOTION_HOLD_MS)) {
+        s_motion_active = false;
+        policy_apply_t(CONFIG_SENDER_T_IDLE_MS, "运动倒计时结束, 转省电");
     }
 }
 
@@ -244,28 +318,28 @@ static int cmd_open(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    request_command(FOC_LINK_CMD_OPEN);
+    request_command(FOC_DOOR_CMD_OPEN, 0);
     return 0;
 }
 static int cmd_close(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    request_command(FOC_LINK_CMD_CLOSE);
+    request_command(FOC_DOOR_CMD_CLOSE, 0);
     return 0;
 }
 static int cmd_stop(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    request_command(FOC_LINK_CMD_STOP);
+    request_command(FOC_DOOR_CMD_STOP, 0);
     return 0;
 }
 static int cmd_wake(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    request_command(FOC_LINK_CMD_WAKE);
+    request_command(FOC_DOOR_CMD_WAKE, 0);
     return 0;
 }
 static int cmd_heartbeat(int argc, char **argv)
@@ -273,9 +347,11 @@ static int cmd_heartbeat(int argc, char **argv)
     (void)argc;
     (void)argv;
     s_repeat_left = 0;
-    s_pending_cmd = FOC_LINK_CMD_NONE;
-    update_periodic_data(FOC_LINK_CMD_NONE);
-    printf("回到心跳 (CMD_NONE)\n");
+    s_pending_cmd = FOC_DOOR_CMD_NONE;
+    s_pending_arg = 0;
+    s_seq++;
+    update_periodic_data(FOC_DOOR_CMD_NONE, s_seq, 0);
+    printf("回到心跳 (CMD_NONE), 序号 %u\n", s_seq);
     return 0;
 }
 static int cmd_payload(int argc, char **argv)
@@ -283,20 +359,62 @@ static int cmd_payload(int argc, char **argv)
     (void)argc;
     (void)argv;
     uint8_t buf[FOC_LINK_PKT_LEN];
-    build_payload(buf, FOC_LINK_CMD_NONE);
+    build_payload(buf, s_pending_cmd, s_pending_seq ? s_pending_seq : s_seq, s_pending_arg);
     printf("载荷 %d 字节: ", FOC_LINK_PKT_LEN);
     for (int i = 0; i < FOC_LINK_PKT_LEN; i++) {
         printf("%02X ", buf[i]);
     }
-    printf("\n(little-endian; magic=0x%04X ver=%d recv=0x%X session=%u seq=%u)\n",
+    printf("\n(little-endian; magic=0x%04X ver=%d recv=0x%X session=%u seq=%u arg=%u)\n",
            FOC_LINK_MAGIC, FOC_LINK_VERSION, CONFIG_SENDER_RECEIVER_ID,
-           s_session, s_sequence);
+           s_session, s_pending_seq, s_pending_arg);
+    return 0;
+}
+
+/* ---- T 策略命令 (陀螺仪未上时的手动/模拟入口) ---- */
+static int cmd_t(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "auto")) {
+        s_t_auto = true;
+        s_motion_active = false;
+        printf("T 策略 → 自动: 运动 %d ms / 静止 %d ms (倒计时 %d ms)\n",
+               CONFIG_SENDER_T_ACTIVE_MS, CONFIG_SENDER_T_IDLE_MS,
+               CONFIG_SENDER_MOTION_HOLD_MS);
+        return 0;
+    }
+    if (argc > 1) {
+        uint32_t ms = (uint32_t)strtoul(argv[1], nullptr, 10);
+        s_t_auto = false;
+        policy_apply_t(ms, "手动");
+        printf("T 策略 → 手动 (t auto 恢复自动)\n");
+        return 0;
+    }
+    printf("T 策略: %s | 运动时 %d ms, 静止时 %d ms, 倒计时 %d ms\n",
+           s_t_auto ? "自动" : "手动",
+           CONFIG_SENDER_T_ACTIVE_MS, CONFIG_SENDER_T_IDLE_MS,
+           CONFIG_SENDER_MOTION_HOLD_MS);
+    printf("注意: 改 T 只在**接收端**生效 (PA 是单向链路, 没有回执); "
+           "接收端用 `wl status` 看实得值\n");
+    return 0;
+}
+
+static int cmd_motion(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    s_t_auto = true;
+    policy_on_motion();
+    printf("已模拟一次运动唤醒 (T → %d ms)\n", CONFIG_SENDER_T_ACTIVE_MS);
     return 0;
 }
 static int cmd_session(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     s_session++;
-    s_sequence = 0;
+    s_seq = 0; /* 新 session ⇒ 接收端无条件接受并重置序号基线 */
+    s_repeat_left = 0;
+    s_seq++;
+    update_periodic_data(FOC_DOOR_CMD_NONE, s_seq, 0);
     printf("session → %u, sequence 归零\n", s_session);
     return 0;
 }
@@ -319,6 +437,8 @@ static void console_start(void)
         {.command = "heartbeat", .help = "回到 CMD_NONE 心跳",  .func = cmd_heartbeat},
         {.command = "payload",   .help = "打印当前载荷十六进制", .func = cmd_payload},
         {.command = "session",   .help = "递增 session 并归零 sequence", .func = cmd_session},
+        {.command = "t",         .help = "t [ms|auto] 设/查唤醒周期 T", .func = cmd_t},
+        {.command = "motion",    .help = "模拟一次陀螺仪运动唤醒",     .func = cmd_motion},
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
@@ -377,6 +497,22 @@ void app_main(void)
     ble_store_config_init();
     nimble_port_freertos_init(host_task);
 
+#if CONFIG_SENDER_MOTION_GPIO >= 0
+    /* 运动检测输入 (陀螺仪 INT): 只做输入轮询, 20Hz 足够判"有人动了"。
+     * 陀螺仪换型/换实现时只改这里, 策略代码 (policy_*) 不动。 */
+    {
+        gpio_config_t mg = {
+            .pin_bit_mask = 1ULL << CONFIG_SENDER_MOTION_GPIO,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&mg));
+        ESP_LOGI(TAG, "运动检测输入 = GPIO%d", CONFIG_SENDER_MOTION_GPIO);
+    }
+#endif
+
     console_start();
     ESP_LOGI(TAG, "就绪。指令: open / close / stop / wake / heartbeat / payload");
     ESP_LOGI(TAG, "⚠️ 发送端无 ACK, 靠 Kconfig 的 SENDER_REPEAT=%d 重复发送保证送达",
@@ -384,6 +520,7 @@ void app_main(void)
 
     while (1) {
         dispatch_tick();
+        policy_tick();
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

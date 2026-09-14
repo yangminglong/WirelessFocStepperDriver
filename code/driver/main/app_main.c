@@ -23,6 +23,7 @@
 #include "ipropi_sense.h"
 #include "led_ws2812.h"
 #include "net_ota.h"
+#include "pa_wake.h"
 #include "platform_button.h"
 #include "platform_console.h"
 #include "platform_events.h"
@@ -39,6 +40,9 @@
 static const char *TAG = "MAIN";
 
 esp_err_t app_console_init(void); /* app_console.c */
+
+/* 是否正处于"无线监听档"(见下面的睡眠分流)。用于进出该档时的一次性动作 */
+static bool s_listening = false;
 
 static esp_err_t init_nvs(void)
 {
@@ -68,8 +72,16 @@ void app_main(void)
     ESP_ERROR_CHECK(platform_button_init());
     /* CAN: 上电默认睡眠 (Rs 高) */
     ESP_ERROR_CHECK(can_init());
-    /* 唤醒源 */
+    /* 唤醒源 (本地: 编码器 INT / 干接点) */
     ESP_ERROR_CHECK(wakeup_init());
+
+    /* 无线唤醒接收端 (BLE 周期广播): 这里只建 host 与控制器, **不起射频** ——
+     * 何时监听是应用策略, 由 app_door_init() 按 FOCSTEP_PA_BOOT_LISTEN 开窗。 */
+#if CONFIG_FOCSTEP_PA_WAKE_ENABLE
+    if (pa_wake_init(CONFIG_FOCSTEP_RECEIVER_ID) != ESP_OK) {
+        ESP_LOGW(TAG, "无线唤醒未就绪 (本地功能不受影响)");
+    }
+#endif
 
     /* ---- 3. 电机与采样 ---- */
     ESP_ERROR_CHECK(ipropi_init());
@@ -115,7 +127,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot done. 平台自检: id/regs/circle/vbus/brake/vref/int");
     ESP_LOGI(TAG, "应用命令: open/close/stop/wake/mode/learn/home");
-    ESP_LOGI(TAG, "⚠️ 首次上板请先 `id` 验芯片, 再 `brake` 裁决 EN/PH, 然后 `learn`");
+    ESP_LOGI(TAG, "⚠️ 首次上板请先 `id` 验芯片, 再 `brake` 验 EN/PH 接法, 然后 `learn`");
 
     /* ================= 主循环 ================= */
     TickType_t last = xTaskGetTickCount();
@@ -126,10 +138,48 @@ void app_main(void)
         app_door_tick();
         /* 注意: 灯不需要在这里 tick —— 闪灯时序由 led_indicator 自己的任务推进 */
 
-        /* 深睡 */
-        if (power_state_current() == PS_SLEEP && CONFIG_FOCSTEP_DEEP_SLEEP_ENABLE) {
-            /* 深睡前存位置 —— **(圈数, 单圈角)** 成对存, 唤醒时才能判断
-             * "睡着期间被动过没有" (§10.4 ②)。只存圈数是不够的。 */
+        /* ---- 睡眠档 (PS_SLEEP) ---- */
+        if (power_state_current() == PS_SLEEP && CONFIG_FOCSTEP_SLEEP_ENABLE) {
+
+#if CONFIG_FOCSTEP_PA_WAKE_ENABLE
+            /* 【监听档】无线唤醒开着时**不进显式睡眠** —— 交给 PM 自动轻睡,
+             * 由 BLE 控制器按 PA 窗口排唤醒 (显式 esp_light_sleep_start() 只认
+             * 我们配的冷唤醒源, 不会给 PA 窗口留时间)。见 code/README.md §13。 */
+            if (pa_wake_mode() == PA_WAKE_PA) {
+                if (!s_listening) {
+                    s_listening = true;
+                    /* 本地手拉仍要能唤醒: arm ext1。INT 是锁存型 ⇒ 醒来查电平即可。 */
+#if CONFIG_FOCSTEP_WAKE_ON_ENCODER
+                    ESP_ERROR_CHECK(wakeup_enable_encoder_ext1());
+#endif
+                    wakeup_log_config();
+                    ESP_LOGW(TAG, "进入无线监听档: 节拍 %d ms, 由 PM 自动轻睡接管",
+                             CONFIG_FOCSTEP_PA_TICK_MS);
+                }
+                /* 本地手拉: 与轻睡档共用同一条恢复路径
+                 * (关 ext1 → 读一次数据清 INT 锁存 → 一致性检查 → 发 WOKE 事件) */
+                if (wakeup_encoder_int_asserted()) {
+                    s_listening = false;
+                    wakeup_resume_from_light_sleep();
+                }
+                /* 无线指令由 NimBLE host 任务直接发事件; 这里只按慢节拍跑安全逻辑。
+                 * ⚠️ 节拍必须慢: 每次唤醒都要付控制器固定的轻睡退出开销。 */
+                vTaskDelay(pdMS_TO_TICKS(CONFIG_FOCSTEP_PA_TICK_MS));
+                continue;
+            }
+            /* 从监听档退出 (或从未进入): 关掉监听期用的 ext1, 并重置时间基,
+             * 免得 100ms 的 vTaskDelayUntil 追打。 */
+            if (s_listening) {
+                s_listening = false;
+                wakeup_disable_ext1();
+                last = xTaskGetTickCount();
+            }
+#endif /* CONFIG_FOCSTEP_PA_WAKE_ENABLE */
+
+#if CONFIG_FOCSTEP_SLEEP_MODE_DEEP
+            /* DeepSleep: 唤醒即复位 ⇒ 睡前把 **(圈数, 单圈角)** 成对写进 NVS,
+             * 唤醒后由 foc_motor_restore_position() 判断"睡着期间被动过没有" (§10.4 ②)。
+             * 只存圈数是不够的。 */
             foc_motor_save_position();
 
 #if CONFIG_FOCSTEP_WAKE_ON_ENCODER
@@ -141,6 +191,50 @@ void app_main(void)
 
             esp_deep_sleep_start();
             /* 不会返回 */
+
+#else /* CONFIG_FOCSTEP_SLEEP_MODE_LIGHT */
+            /* LightSleep: 唤醒**不复位**, 从 esp_light_sleep_start() 之后继续执行。
+             * ⇒ 位置只记在 RAM (不写 NVS); 醒来必须清 INT 锁存 + 重做可信度判定。
+             * ⚠️ 直接调 esp_light_sleep_start() 时 IDF **不补偿 FreeRTOS tick**
+             *    (只有自动轻睡才走 pm_step_tick) ⇒ 醒来必须重置时间基。 */
+            foc_motor_mark_sleep_angle();
+
+#if CONFIG_FOCSTEP_WAKE_ON_ENCODER
+            ESP_ERROR_CHECK(wakeup_enable_encoder_ext1());
+#endif
+            wakeup_log_config();
+            ESP_LOGI(TAG, "进入轻睡 (唤醒不复位; nSLEEP 已拉低 ⇒ VREF 门控关断)");
+
+            /* 醒来先看 INT 电平再决定: KTH5701 的 INT 是**锁存**的 ⇒
+             * "这次醒来是不是手拉"只看电平就够, 不依赖唤醒掩码
+             * (掩码在 RTC 域, 且与共线的干接点分不开)。 */
+            while (power_state_current() == PS_SLEEP) {
+                esp_err_t sret = esp_light_sleep_start();
+                bool int_high = wakeup_encoder_int_asserted();
+
+                if (sret != ESP_OK && sret != ESP_ERR_SLEEP_REJECT) {
+                    ESP_LOGW(TAG, "轻睡失败: %s ⇒ 退回主循环 (查唤醒源/PM 配置)",
+                             esp_err_to_name(sret));
+                    break;
+                }
+                if (!int_high) {
+                    /* 不是编码器唤醒 (RTC 定时/干接点等), 或被拒绝但本脚没触发:
+                     * 被拒绝 = "有唤醒源已处于有效态", 延一拍免得空转, 然后接着睡。 */
+                    if (sret == ESP_ERR_SLEEP_REJECT) {
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                    continue;
+                }
+                /* 手拉: 关唤醒源 + 清 INT 锁存 + 一致性检查 + 发 WOKE 事件 */
+                wakeup_resume_from_light_sleep();
+                break;
+            }
+
+            /* ★ 时间基重置: 轻睡期间 tick 不前进, 不重置 vTaskDelayUntil 会连续追打 */
+            last = xTaskGetTickCount();
+            /* 让高优先级的事件任务先把 WOKE 处理完 (它会请求 PS_ACTIVE) */
+            vTaskDelay(pdMS_TO_TICKS(1));
+#endif
         }
 
         vTaskDelayUntil(&last, pdMS_TO_TICKS(100));

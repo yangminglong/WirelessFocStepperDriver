@@ -39,7 +39,8 @@ void foc_link_encode(uint8_t *out, const foc_link_pkt_t *pkt)
     out[9]  = pkt->session;
     put_le16(&out[10], pkt->sequence);
     put_le32(&out[12], pkt->nonce);
-    put_le16(&out[16], foc_link_crc16(out, FOC_LINK_CRC_COVER_LEN));
+    put_le16(&out[16], pkt->arg);
+    put_le16(&out[18], foc_link_crc16(out, FOC_LINK_CRC_COVER_LEN));
 }
 
 bool foc_link_decode(const uint8_t *in, size_t len,
@@ -59,7 +60,8 @@ bool foc_link_decode(const uint8_t *in, size_t len,
     pkt->sequence    = (uint16_t)(in[10] | (in[11] << 8));
     pkt->nonce       = (uint32_t)in[12] | ((uint32_t)in[13] << 8) |
                        ((uint32_t)in[14] << 16) | ((uint32_t)in[15] << 24);
-    pkt->crc16       = (uint16_t)(in[16] | (in[17] << 8));
+    pkt->arg         = (uint16_t)(in[16] | (in[17] << 8));
+    pkt->crc16       = (uint16_t)(in[18] | (in[19] << 8));
 
     /* 先判"是不是本协议", 再判 CRC —— 两者语义不同, 不能合并成一个 false */
     if (pkt->magic != FOC_LINK_MAGIC || pkt->version != FOC_LINK_VERSION) {
@@ -108,14 +110,14 @@ foc_link_rx_result_t foc_link_rx_filter(foc_link_rx_state_t *st,
     return FOC_LINK_ACCEPT;
 }
 
-const char *foc_link_cmd_name(uint8_t cmd)
+uint8_t foc_link_peek_version(const uint8_t *in, size_t len)
 {
-    switch (cmd) {
-    case FOC_LINK_CMD_NONE:  return "NONE";
-    case FOC_LINK_CMD_WAKE:  return "WAKE";
-    case FOC_LINK_CMD_OPEN:  return "OPEN";
-    case FOC_LINK_CMD_CLOSE: return "CLOSE";
-    case FOC_LINK_CMD_STOP:  return "STOP";
-    default:                 return "?";
+    if (in == NULL || len < 3) {
+        return 0;
     }
+    uint16_t magic = (uint16_t)(in[0] | (in[1] << 8));
+    if (magic != FOC_LINK_MAGIC) {
+        return 0;
+    }
+    return in[2];
 }

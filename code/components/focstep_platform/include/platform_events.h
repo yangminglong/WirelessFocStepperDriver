@@ -76,6 +76,16 @@ typedef enum {
 
     /* 从深睡被唤醒。data = focstep_evt_wake_t */
     FOCSTEP_EVT_WOKE,
+
+    /* 无线链路 (BLE 周期广播) 收到一条给本板的载荷。
+     * data = focstep_evt_pa_cmd_t。平台层只做校验/寻址/去重与投递,
+     * **不解释 cmd 的含义** —— 命令语义见应用层协议 components/foc_door_link。
+     * 应用可用 pa_wake_set_payload_filter() 滤掉不需要的包 (典型: 自己的心跳,
+     * 逐包投递要多付约 13% 的 C_RX)。平台侧模块: pa_wake.c */
+    FOCSTEP_EVT_PA_CMD,
+    /* 无线唤醒链路的同步状态变化 (同步成功 / 失步重扫)。
+     * data = focstep_evt_pa_sync_t。用于应用层判断"现在能不能被远程唤醒"。 */
+    FOCSTEP_EVT_PA_SYNC,
 } focstep_event_id_t;
 
 typedef struct {
@@ -119,6 +129,19 @@ typedef struct {
     focstep_evt_base_t base;
     int src; /* wake_src_t */
 } focstep_evt_wake_t;
+
+typedef struct {
+    focstep_evt_base_t base;
+    int      cmd;  /* **应用层协议值** (components/foc_door_link: FOC_DOOR_CMD_*) */
+    uint32_t arg;  /* 该命令的参数 (含义随 cmd; 不用的命令为 0) */
+} focstep_evt_pa_cmd_t;
+
+typedef struct {
+    focstep_evt_base_t base;
+    int      synced;   /* 1 = 已建立周期同步, 0 = 未同步 (重扫中/已关闭) */
+    uint32_t t_ms;     /* 当前实际生效的唤醒周期 T = per_adv_ival×(skip+1) */
+    uint32_t lost_cnt; /* 累计失步次数 (判链路质量) */
+} focstep_evt_pa_sync_t;
 
 /* 初始化事件循环与事件基。可重复调用。 */
 esp_err_t platform_events_init(void);

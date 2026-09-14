@@ -55,6 +55,7 @@ typedef enum {
     LED_IDX_FAULT4,
     LED_IDX_FAULT5,
     LED_IDX_FAULT6,
+    LED_IDX_FAULT7,    /* 闪 7 次 = PS_FAULT_CALIB (行程标定缺失/失败) */
     LED_IDX_MAX,
 } led_idx_t;
 

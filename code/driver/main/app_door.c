@@ -6,9 +6,11 @@
 #include "homing.h"
 #include "ipropi_sense.h"
 #include "led_ws2812.h"
+#include "pa_wake.h"
 #include "platform_events.h"
 #include "power_state.h"
 #include "wakeup.h"
+#include "foc_door_link.h" /* 无线指令集 (应用层协议, 与发送端同一份定义) */
 
 #include <math.h>
 #include <stdio.h>
@@ -29,6 +31,29 @@ static TickType_t s_mode_since = 0;
 static TickType_t s_last_cmd = 0;
 static bool s_stall_acted = false;
 static float s_assist_volts = 2.0f;
+
+/* 无线载荷过滤: 心跳不打扰上层。
+ * 为什么值得: 逐包都发事件会让 host 侧多耗约 13% 的 C_RX (实测), 而心跳是常态。
+ * ⚠️ 本函数跑在 NimBLE host 任务上下文 —— 只做判断, 别干别的。 */
+static bool pa_payload_filter(uint8_t cmd, uint16_t arg)
+{
+    (void)arg;
+    return cmd != FOC_DOOR_CMD_NONE;
+}
+
+/* 无线监听窗口 (出厂行为: 上电开窗, 无活动则自动关闭回 µA 档)。
+ * 见 code/README.md §13 —— 窗口计时器归应用, 平台只管射频。 */
+static TickType_t s_pa_hold_since = 0;
+
+/* 有"活动"就重新计时。活动 = 远程指令 / 本地唤醒 / 按键 / CAN / 命令台。
+ * ⚠️ 发送端**心跳不算活动** (否则窗口永不回落) —— 心跳在平台层就被丢掉了。 */
+static void pa_hold_reset(const char *why)
+{
+    s_pa_hold_since = xTaskGetTickCount();
+    if (why) {
+        ESP_LOGD(TAG, "监听窗口重置: %s", why);
+    }
+}
 
 const char *app_door_mode_name(app_mode_t m)
 {
@@ -149,6 +174,17 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         led_show_fault_code(PS_FAULT_VBUS_LOW);
         break;
 
+    case FOCSTEP_EVT_HOMED: {
+        /* 标定/回零结果。平台只报结果, 怎么处置 (点灯/重试/进故障) 是应用的事。 */
+        const focstep_evt_home_t *e = (const focstep_evt_home_t *)data;
+        if ((homing_result_t)e->result != HOME_OK) {
+            ESP_LOGE(TAG, "标定/回零失败: %s (接触点 %.3f rad) ⇒ 位置与行程都不可用",
+                     homing_result_str((homing_result_t)e->result), (double)e->angle);
+            led_show_fault_code(PS_FAULT_CALIB);
+        }
+        break;
+    }
+
     case FOCSTEP_EVT_CAN_LOST:
         /* §10.4 ④: 上报, 但不影响本地控制 (手拉助动照常工作) */
         ESP_LOGW(TAG, "CAN 掉线 (本地控制不受影响)");
@@ -170,8 +206,47 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const focstep_evt_wake_t *e = (const focstep_evt_wake_t *)data;
         if (e->src == WAKE_SRC_ENCODER_INT) {
             ESP_LOGI(TAG, "手拉唤醒 → 唤醒接管");
+            pa_hold_reset("本地手拉"); /* 有人在场 → 重开一个可远程达的窗口 */
             power_state_request(PS_ACTIVE);
             set_mode(APP_MODE_ASSIST);
+        }
+        break;
+    }
+
+    case FOCSTEP_EVT_PA_CMD: {
+        /* 无线链路来的载荷 —— 命令语义在这一层解释 (平台只搬字节)。
+         * 开/关/停/唤醒与 CAN、按键走**同一个落点** (app_door_command),
+         * 包括"位置不可信则拒绝"的门禁; SET_T 则是平台能力的调节, 不进门机流程。 */
+        const focstep_evt_pa_cmd_t *e = (const focstep_evt_pa_cmd_t *)data;
+        ESP_LOGI(TAG, "无线指令: %s (arg=%u)", foc_door_cmd_name((uint8_t)e->cmd), e->arg);
+        switch (e->cmd) {
+        case FOC_DOOR_CMD_WAKE:  app_door_command(APP_CMD_WAKE);  break;
+        case FOC_DOOR_CMD_OPEN:  app_door_command(APP_CMD_OPEN);  break;
+        case FOC_DOOR_CMD_CLOSE: app_door_command(APP_CMD_CLOSE); break;
+        case FOC_DOOR_CMD_STOP:  app_door_command(APP_CMD_STOP);  break;
+
+        case FOC_DOOR_CMD_SET_T:
+            /* 改唤醒周期: 调用平台接口即可 (换算 skip 是平台的事)。
+             * ⚠️ PA 单向, 对端收不到确认 —— 只能本地用 `wl status` 看实得值。 */
+            ESP_LOGI(TAG, "对端请求唤醒周期 T=%u ms", e->arg);
+            pa_wake_set_T_ms(e->arg);
+            break;
+
+        default:
+            break;
+        }
+        break;
+    }
+
+    case FOCSTEP_EVT_PA_SYNC: {
+        /* 同步建立/丢失只用来看链路健康与重置窗口 —— 同步本身不唤醒门机 */
+        const focstep_evt_pa_sync_t *e = (const focstep_evt_pa_sync_t *)data;
+        if (e->synced) {
+            ESP_LOGI(TAG, "无线链路已同步, T=%u ms (失步累计 %u 次)",
+                     e->t_ms, e->lost_cnt);
+            pa_hold_reset("链路同步");
+        } else {
+            ESP_LOGW(TAG, "无线链路未同步 (失步累计 %u 次)", e->lost_cnt);
         }
         break;
     }
@@ -186,6 +261,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 void app_door_command(app_cmd_t cmd)
 {
     s_last_cmd = xTaskGetTickCount();
+    /* 任何来源的指令 (按键/CAN/无线/命令台) 都算"活动" ⇒ 重开无线监听窗口。
+     * 放在这里而不是各事件分支里: 一处覆盖全部来源, 不会漏。 */
+    pa_hold_reset("收到指令");
 
     switch (cmd) {
     case APP_CMD_WAKE:
@@ -202,10 +280,19 @@ void app_door_command(app_cmd_t cmd)
         }
         if (!foc_motor_position_trusted()) {
             /* 位置不可信时拒绝执行 —— 否则会以错误基准冲到机械限位。
-             * 正确做法是先回零 (learn / home 命令, 或应用自动触发)。 */
-            ESP_LOGE(TAG, "位置不可信, 拒绝 %s 指令 —— 请先回零 (learn)",
+             * 正确做法是先标定/回零 (learn / mark 命令, 或应用自动触发)。 */
+            ESP_LOGE(TAG, "位置不可信, 拒绝 %s 指令 —— 请先标定 (learn/mark)",
                      (cmd == APP_CMD_OPEN) ? "开" : "关");
             led_show_fault_code(PS_FAULT_ENCODER);
+            return;
+        }
+        if (!foc_motor_has_range()) {
+            /* ★ 决定 #7: "全开/全关"只在**零点 + 满行程点都标定**后才成立。
+             *   只有零点时 100% 无从定义, 照旧逻辑跑会冲到错误的角。 */
+            ESP_LOGE(TAG, "行程不完整 (%s), 拒绝 %s 指令 —— 全开/全关需要零点与满行程点都在",
+                     foc_motor_range_state_str(foc_motor_range_state()),
+                     (cmd == APP_CMD_OPEN) ? "开" : "关");
+            led_show_fault_code(PS_FAULT_CALIB);
             return;
         }
         set_mode(APP_MODE_RUNNING);
@@ -235,6 +322,15 @@ void app_door_command(app_cmd_t cmd)
 void app_door_tick(void)
 {
     TickType_t now = xTaskGetTickCount();
+
+    /* 无线监听窗口到期 → 关监听回落 µA 档 (出厂行为, 见 code/README.md §13)。
+     * 落回深睡后只有本地唤醒能叫醒; 本地一被叫醒, 窗口会重新打开。 */
+    if (pa_wake_mode() == PA_WAKE_PA &&
+        (now - s_pa_hold_since) > pdMS_TO_TICKS(CONFIG_FOCSTEP_PA_LISTEN_HOLD_MS)) {
+        ESP_LOGI(TAG, "无线监听窗口到期 (%d ms 无活动), 关监听回深睡",
+                 CONFIG_FOCSTEP_PA_LISTEN_HOLD_MS);
+        pa_wake_set_mode(PA_WAKE_OFF);
+    }
 
     /* 堵转判定: 采样已在 FOC 循环里做成峰值包络 (1kHz), 这里只读包络 + 判定。
      * 触发后 ipropi 会发 FOCSTEP_EVT_STALL, 由本文件的事件处理器处置。 */
@@ -307,6 +403,18 @@ esp_err_t app_door_init(void)
     s_mode_since = xTaskGetTickCount();
     s_last_cmd = s_mode_since;
     led_set_color(LED_COLOR_OFF);        /* 深睡=灭 */
+
+    /* 装载载荷过滤 (与是否立即开监听无关: 之后 `wl pa` 也受益) */
+    pa_wake_set_payload_filter(pa_payload_filter);
+
+#if CONFIG_FOCSTEP_PA_BOOT_LISTEN
+    /* 出厂行为: 上电就开一个无线监听窗口 (超时回落由 tick 负责)。
+     * ⚠️ 这不是 §六 的深睡档: 监听期是**另一档功耗** (亚 mA, 按 T 分档), 见 doc §六。 */
+    pa_hold_reset(NULL);
+    if (pa_wake_set_mode(PA_WAKE_PA) != ESP_OK) {
+        ESP_LOGW(TAG, "无线监听开启失败 (未编入或 BT 未启); 本地功能不受影响");
+    }
+#endif
 
     ESP_LOGI(TAG, "推拉门应用就绪: 助动力矩 %.2fV, 接管保持 %d ms, 空闲入睡 %d ms",
              (double)s_assist_volts, CONFIG_FOCSTEP_WAKE_HOLD_MS,

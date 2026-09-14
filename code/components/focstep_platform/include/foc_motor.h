@@ -5,8 +5,8 @@
  *
  * ── 两个关键设计选择, 都有源码/手册依据 ──────────────────────
  *
- * ★ 1. 用 `StepperDriver2PWM` + **PH/EN 模式 (PMODE=低)**, 不用文档 §10.1 写的
- *      `StepperDriver4PWM` + PMODE=高。依据 DRV8874 数据手册真值表:
+ * ★ 1. 用 `StepperDriver2PWM` + **PH/EN 模式 (PMODE=低)** —— 即 doc.md v0.7 §10.1 定稿口径
+ *      (v0.6 及以前文档写的 `StepperDriver4PWM` + PMODE=高**已作废**)。依据 DRV8874 数据手册真值表:
  *
  *        Table 3 PH/EN (PMODE=低):  EN=0 → **Brake (Low-Side Slow Decay)**
  *        Table 4 PWM  (PMODE=高):  IN1=IN2=0 → **Coast (Hi-Z)**
@@ -22,7 +22,7 @@
  *
  *      附带好处: 慢衰减的电流纹波更小 (对齐 §10.4 的"无异响"), 且 LEDC 占用 4→2 路。
  *      **引脚完全不变**: GPIO10/11/14/15 本来就是每片一 EN 一 PH。
- *      ⚠️ PMODE (GPIO6) 必须保持**低**。doc §五.4 本来就写了"上电默认低（PH/EN安全态）"。
+ *      ⚠️ PMODE (GPIO6) 必须保持**低**。doc §五.4 定稿"上电默认低（PH/EN 安全态）", 与本设计一致。
  *
  * ★ 2. 力矩环用 `TorqueControlType::estimated_current` (需实测 phase_resistance)。
  *      事实边界 (已核对源码):
@@ -77,8 +77,15 @@ void foc_motor_stop_loop(void);
 void foc_motor_set_mode(foc_mode_t mode);
 foc_mode_t foc_motor_get_mode(void);
 
-/* 位置环目标: 归一化 0.0 = 全关, 1.0 = 全开 */
+/* 位置环目标: 归一化 0.0 = 零点(全关), 1.0 = 满行程点(全开)。
+ * ⚠️ 要求: 位置可信 **且** 行程完整(BOTH) —— 否则拒绝执行 (打日志, 不动)。
+ * 输入会被**夹到 [0,1]**; 需要越过零点/超出满程请用 foc_motor_move_to_ext()。 */
 void foc_motor_move_to(float normalized);
+
+/* 同 move_to, 但**不夹紧**: 允许负开度(越过零点)或 >1(超出满行程点)。
+ * 用途: 手工标定/探边/机构调试。门禁仍要求位置可信 + 行程完整;
+ * 越界会打警告日志 (这是"故意允许"的动作)。 */
+esp_err_t foc_motor_move_to_ext(float normalized);
 void foc_motor_stop(void);
 
 /* 绝对多圈角目标 (rad)。回零用 —— 可以指到行程之外, 逼机构顶到机械限位。 */
@@ -94,10 +101,6 @@ float foc_motor_get_voltage_limit(void);
 
 /* Kconfig 配的运行电压上限。应用临时改小力矩 (如助动) 后, 用这个恢复。 */
 float foc_motor_default_voltage_limit(void);
-
-/* 行程限位 (由回零自学习得到, 存 NVS) */
-void foc_motor_set_travel_range(float min_rad, float max_rad);
-void foc_motor_get_travel_range(float *min_rad, float *max_rad);
 
 /* 直接给 q 轴力矩 (单位 V, 受 voltage_limit 限幅)。配合 FOC_MODE_TORQUE 使用。
  * 正负号 = 方向。应用可拿它做助动/张紧/保持 —— 具体策略在应用层。 */
@@ -141,6 +144,60 @@ esp_err_t foc_motor_characterise(float volts);
 esp_err_t foc_motor_save_position(void);
 esp_err_t foc_motor_restore_position(void);
 
+/* ── 行程模型: 零点 + 满行程点 ─────────────────────────────────
+ *
+ * 行程由**两个语义端点**定义, 而**不是**按角度大小排的 min/max:
+ *
+ *     零点 (0% 开度) ──span──► 满行程点 (100% 开度)
+ *
+ *   · `zero_rad` / `end_rad` 都是绝对多圈角 (rad), 各自独立保存
+ *   · `span = end_rad - zero_rad` **带符号** ⇒ "正方向"由 span 的符号表达,
+ *     天然支持"零点的角度比满行程点更大"这种反装机构, 不需要排序
+ *   · 开度映射: `target = zero_rad + normalized × span`
+ *
+ * 三态 (没有"有行程无零点"这种状态):
+ *   NONE        未标定 ⇒ **拒绝一切开度指令** (不再退回任何占位值)
+ *   ZERO_ONLY   只标了零点 ⇒ 位置可锚定, 但开度不可用
+ *   BOTH        零点 + 满行程点 ⇒ 0%/100% 生效 (即"全关/全开")
+ *
+ * ⚠️ 行程是**编码器机械角坐标系**里的两个端点 ⇒ `ENCODER_DIRECTION` /
+ *    `ENCODER_ZERO_OFFSET` 一改, 旧行程立刻不再对应机械端点。本模块把这两个
+ *    值随行程一起存 NVS (指纹), 开机比对不上就**自动作废行程并标记位置不可信**
+ *    (必须重标) —— 否则会出现"能跑但整段错位"这种现场发现不了的错。
+ */
+typedef enum {
+    RANGE_NONE = 0,
+    RANGE_ZERO_ONLY,
+    RANGE_BOTH,
+} range_state_t;
+
+/* 行程最小跨度 (rad): 两端离得比这还近就说明标反了端或机构有问题 ⇒ 拒绝写入。
+ * foc_motor 与 homing 共用这一个口径 (两处的校验必须一致)。 */
+#define FOC_MOTOR_MIN_SPAN_RAD 0.1f
+
+const char *foc_motor_range_state_str(range_state_t st);
+range_state_t foc_motor_range_state(void);
+
+/* 行程是否**完整**(= BOTH)。不完整时开度指令会被拒绝 */
+bool foc_motor_has_range(void);
+
+/* 标定"零点"(0% 开度) 与"满行程点"(100% 开度)。
+ * ★ 若另一端已标定, **它的物理位置保持不变**, 只按新端点重算 span ——
+ *   即重标零点不会把满行程点一起拖走 (反之亦然)。
+ * 跨度校验: |span| 必须 ≥ 0.1 rad, 否则拒绝 (什么都不改)。
+ * 约束: 先有零点才能设满行程点 (无零点 ⇒ ESP_ERR_INVALID_STATE)。 */
+esp_err_t foc_motor_set_zero(float rad);
+esp_err_t foc_motor_set_end(float rad);
+
+/* 反向: 把零点与满行程点**对调** ⇒ "正方向"随之取反 (0%/100% 互换)。
+ * ⚠️ 这是纯数据变换, 不碰编码器/Motor 的任何约定 —— 反转**编码器**约定仍走
+ *    Kconfig 的 ENCODER_DIRECTION (那条路会让已标定行程按指纹校验作废)。
+ * 要求 BOTH (只有一端时"反向"没有意义)。 */
+esp_err_t foc_motor_invert_travel(void);
+
+/* 读行程: zero/end 为绝对角, span = end - zero (可负)。任一指针可为 NULL。 */
+void foc_motor_get_range(float *zero_rad, float *end_rad, float *span_rad);
+
 /* 位置是否可信 (是否需要在执行运动指令前先回零) */
 bool foc_motor_position_trusted(void);
 void foc_motor_invalidate_position(const char *reason);
@@ -156,6 +213,31 @@ void *foc_motor_encoder_handle(void);
 
 /* 切换编码器功耗档。cmd: 0x10=连续测量, 0x20=Wake-up&Sleep (深睡档) */
 esp_err_t foc_motor_encoder_set_mode(uint8_t cmd);
+
+/* ── 轻睡档 (Kconfig FOCSTEP_SLEEP_MODE_LIGHT) 支持 ─────────────
+ *
+ * ★ 为什么需要这一组: DeepSleep 唤醒即复位 ⇒ 一切靠"重跑 init + 读 NVS"解决;
+ *   而 LightSleep 唤醒**不复位、从睡眠点继续** ⇒ 必须显式处理三件事:
+ *     ① 1kHz 的 FOC 任务要暂停, 否则系统永远到不了 idle, 且醒来会追打时间基;
+ *     ② KTH5701 的 INT 是**锁存型**, 醒来必须读一次数据清掉, 否则立刻重复唤醒;
+ *     ③ 睡着期间门若被拉动, 多圈计数会发散 ⇒ 醒来要重做"位置是否可信"的判定。
+ */
+
+/* 暂停/恢复 FOC 任务。进 PS_SLEEP 前暂停, 回 PS_ACTIVE 时恢复。
+ * 恢复时会自动重置时间基 —— ⚠️ 直接调 esp_light_sleep_start() 时 IDF **不补偿**
+ * FreeRTOS tick (只有自动轻睡才走 pm_step_tick), 不重置会让 vTaskDelayUntil 连续追打。 */
+void foc_motor_pause_loop(void);
+void foc_motor_resume_loop(void);
+
+/* 读一次编码器数据清 INT 锁存 (KTH5701: 高有效、锁存、读数据清零)。
+ * 返回 INT 是否已归低。⚠️ 轻睡醒来后**必须**调用, 否则下次入睡会被立即再次唤醒。 */
+bool foc_motor_encoder_clear_int(void);
+
+/* 睡前记下当前单圈角 (只存 RAM, **不写 NVS** —— 轻睡 RAM 保留);
+ * 醒来调 check 比对, 超容差 ⇒ 位置标记不可信, 需重新回零。
+ * 判据与 foc_motor_restore_position() 里的一致性检查相同 (共用一个 helper)。 */
+void foc_motor_mark_sleep_angle(void);
+esp_err_t foc_motor_check_sleep_angle(void);
 
 #ifdef __cplusplus
 }

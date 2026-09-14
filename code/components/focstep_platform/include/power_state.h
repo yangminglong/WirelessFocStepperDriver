@@ -56,6 +56,7 @@ typedef enum {
 #define PS_FAULT_CAN_LOST    4 /* CAN 掉线 */
 #define PS_FAULT_NFAULT      5 /* DRV8874 nFAULT 拉低 */
 #define PS_FAULT_VBUS_LOW    6 /* 母线过低 */
+#define PS_FAULT_CALIB       7 /* 行程标定缺失/失败 (零点或满行程点没标出来) */
 
 esp_err_t power_state_init(void);
 

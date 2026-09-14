@@ -51,6 +51,21 @@ wake_src_t wakeup_get_source(void);
 /* 进深睡前调用: 打印将要生效的唤醒配置, 便于串口核对 */
 void wakeup_log_config(void);
 
+/* ── 轻睡档 (Kconfig FOCSTEP_SLEEP_MODE_LIGHT) ────────────────── */
+
+/* 编码器 INT 线当前是否为高 (锁存未清)。
+ * 轻睡循环用它判断"这次醒来是不是手拉" —— 因为 INT 是**锁存**的,
+ * 只看电平就够, 不依赖唤醒掩码。 */
+bool wakeup_encoder_int_asserted(void);
+
+/* ★ 轻睡醒来后立即调用, 一个函数做完三件事:
+ *     ① 关 ext1 (处理期间不再被它打断; 下次进睡前重新 arm)
+ *     ② 读一次编码器数据**清 INT 锁存**并做"睡着期间是否被动过"的一致性检查
+ *     ③ 发 FOCSTEP_EVT_WOKE 事件 (由应用决定接管还是继续睡)
+ * ⚠️ 必须在**再次进睡之前**调用, 否则同一次中断会把 MCU 立刻重复唤醒。
+ * 返回本次唤醒源。 */
+wake_src_t wakeup_resume_from_light_sleep(void);
+
 #ifdef __cplusplus
 }
 #endif

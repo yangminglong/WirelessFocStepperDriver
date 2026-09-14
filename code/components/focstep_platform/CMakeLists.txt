@@ -22,6 +22,8 @@ idf_component_register(
         # 电源
         "src/power_state.c"
         "src/wakeup.c"
+        # 无线唤醒 (BLE 周期广播接收端; 未编入时为空实现)
+        "src/pa_wake.c"
         # 人机
         "src/led_ws2812.c"
         "src/platform_button.c"
@@ -46,6 +48,9 @@ idf_component_register(
         esp_http_server
         app_update
         mdns
+        esp_pm              # pa_wake: 监听期开 PM 自动轻睡
+        bt                  # pa_wake: NimBLE 主机与控制器 (FOCSTEP_PA_WAKE_ENABLE 时才引用)
+        foc_link_protocol   # pa_wake: PA 载荷解析 (与发送端共用同一份线格式)
 )
 
 # 托管组件 (espressif/esp_simplefoc 等) 由应用层在 main/idf_component.yml 声明,

@@ -43,4 +43,39 @@ menu "FocStepper 无线唤醒发送端"
             不发送任何动作指令, 只维持周期广播。用于测发射端基线功耗。
             对齐 ADI 的语义: 无事件时不递增 DID。
 
+    menu "唤醒周期 T 策略 (陀螺仪)"
+
+        config SENDER_T_ACTIVE_MS
+            int "运动时的 T (ms)"
+            range 100 30000
+            default 500
+            help
+                被运动唤醒后要求接收端用的唤醒周期 (快响应)。
+                ⚠️ 只能落在接收端 per_adv_ival 的整数倍上: 240ms 时 500 会实得 480ms。
+                接收端用 `wl status` 看实得值 (PA 单向, 没有回执)。
+
+        config SENDER_T_IDLE_MS
+            int "静止时的 T (ms)"
+            range 100 60000
+            default 3000
+            help
+                倒计时内无新动作 → 让接收端把 T 放大到本值 (省电)。
+                240ms 间隔下 3000 会实得 3120ms。
+
+        config SENDER_MOTION_HOLD_MS
+            int "运动倒计时 (ms)"
+            range 1000 600000
+            default 30000
+
+        config SENDER_MOTION_GPIO
+            int "运动检测输入 GPIO (-1 = 未接)"
+            default -1
+            help
+                陀螺仪/运动检测的中断脚。接上后: 电平变高即视为"有人动了",
+                自动把 T 调到 SENDER_T_ACTIVE_MS 并起倒计时。
+                未接 (<0) 时用命令台 `motion` 模拟, 其余逻辑完全一致 ——
+                将来换陀螺仪实现只改读取那一处 (policy_tick)。
+
+    endmenu
+
 endmenu

@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h" /* 协作式暂停用的两把信号量 (见 foc_motor_pause_loop) */
 
 /* esp_simplefoc / arduino-foc */
 #include "esp_simplefoc.h"
@@ -43,7 +44,20 @@ static IpropiCurrentSense *s_cs = nullptr;
 
 static TaskHandle_t s_loop_task = nullptr;
 static volatile bool s_loop_run = false;
+static volatile bool s_loop_resync = false; /* resume 后重置时间基 (轻睡档) */
 static volatile foc_mode_t s_mode = FOC_MODE_IDLE;
+
+/* ── 协作式暂停 (轻睡档 / 无线监听档用) ────────────────────────
+ * ⚠️ 不能用 vTaskSuspend(): FOC 循环里 loopFOC() 会读编码器 → 取 i2c_bus 互斥锁,
+ *    在那里被挂起会把锁一直攥着, 别人再去访问 I2C (监听档醒来清 INT 就要读)
+ *    就阻塞/超时 —— INT 清不掉 ⇒ 反复唤醒。
+ * 改法: 立标志 → 循环在**安全点**(loopFOC 之前, 不持任何锁)自己交还控制权 →
+ *    暂停方用信号量确认; 恢复时给另一把信号量放行。 */
+static volatile bool s_loop_pause_req = false;
+static volatile bool s_loop_paused = false;
+static bool s_paused_by_suspend = false; /* 兜底路径 (循环没按时响应) */
+static SemaphoreHandle_t s_loop_pause_sem = nullptr;  /* 循环 → 暂停方: 我已停 */
+static SemaphoreHandle_t s_loop_resume_sem = nullptr; /* 暂停方 → 循环: 继续 */
 
 static volatile float s_torque_target = 0.0f;   /* FOC_MODE_TORQUE 用 */
 static volatile float s_velocity_target = 0.0f; /* FOC_MODE_VELOCITY 用 */
@@ -53,14 +67,35 @@ static volatile uint32_t s_loop_us = 0;
 #define NVS_NS  "focstep"
 #define NVS_KEY_TURNS      "turns"
 #define NVS_KEY_ANGLE_MRAD "angle_mrad" /* 存盘时的单圈角, 毫弧度 */
-#define NVS_KEY_RANGE_MIN  "rmin_mrad"
-#define NVS_KEY_RANGE_MAX  "rmax_mrad"
+/* 行程: 两个**绝对角**端点, 各自独立存 —— 所以"重标一端"不会动到另一端 */
+#define NVS_KEY_RANGE_ZERO "rzero_mrad"
+#define NVS_KEY_RANGE_END  "rend_mrad"
+#define NVS_KEY_RANGE_ST   "rstate"    /* range_state_t */
+/* 旧口径 (按角度大小排的 min/max) 只留作开机清理, 不再读写 */
+#define NVS_KEY_RANGE_MIN_OLD "rmin_mrad"
+#define NVS_KEY_RANGE_MAX_OLD "rmax_mrad"
+/* 标定行程时的"指纹": 行程建立在编码器方向与零位之上, 这两个 Kconfig 一改,
+ * 旧行程就不再对应机械端点 (见 restore 里的一致性检查) */
+#define NVS_KEY_ENC_DIR    "renc_dir"  /* ENCODER_DIRECTION 的值 */
+#define NVS_KEY_ENC_ZERO   "renc_zero" /* ENCODER_ZERO_OFFSET, mrad */
 #define NVS_KEY_TRUSTED    "trusted"
 
-/* 行程限位与位置可信度 */
-static float s_range_min = 0.0f;
-static float s_range_max = 0.0f;
+/* 行程 (零点 + 满行程点, 见 foc_motor.h) 与位置可信度 */
+static float s_zero_rad = 0.0f;      /* 0% 开度 */
+static float s_end_rad = 0.0f;       /* 100% 开度 */
+static range_state_t s_range_state = RANGE_NONE;
 static bool s_position_trusted = false;
+
+/* 轻睡档: 睡前的单圈角。**只存 RAM** —— 轻睡不丢内存, 没必要写 NVS (省一次 flash 写)。 */
+static float s_sleep_angle = 0.0f;
+static bool s_sleep_angle_valid = false;
+
+/* 两角之间的最小差 (0~π)。restore(NVS) 与轻睡醒来(RAM) 共用同一判据。 */
+static float angle_delta(float a, float b)
+{
+    float d = fabsf(a - b);
+    return (d > _2PI - d) ? (_2PI - d) : d;
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -195,6 +230,29 @@ static void foc_loop_task(void *arg)
     uint32_t tick = 0;
 
     while (s_loop_run) {
+        /* ★ 协作式暂停点: 必须在 loopFOC() **之前** —— 此处不持任何锁。
+         * (在 loopFOC 里被挂起会攥着 i2c_bus 锁, 见 foc_motor_pause_loop 的说明) */
+        if (s_loop_pause_req) {
+            s_loop_paused = true;
+            s_loop_resync = true; /* 放行后重置时间基 */
+            if (s_loop_pause_sem) {
+                xSemaphoreGive(s_loop_pause_sem);
+            }
+            if (s_loop_resume_sem) {
+                xSemaphoreTake(s_loop_resume_sem, portMAX_DELAY);
+            }
+            s_loop_paused = false;
+            last = xTaskGetTickCount();
+            continue;
+        }
+
+        /* 轻睡醒来: 时间基必须重置 —— 直接调 esp_light_sleep_start() 时 IDF 不补偿
+         * FreeRTOS tick, 不重置的话 vTaskDelayUntil 会连续追打 (见 foc_motor_pause_loop)。 */
+        if (s_loop_resync) {
+            last = xTaskGetTickCount();
+            s_loop_resync = false;
+        }
+
         uint32_t t0 = (uint32_t)(esp_timer_get_time());
 
         s_motor->loopFOC();
@@ -249,6 +307,13 @@ esp_err_t foc_motor_start_loop(void)
     if (s_loop_task) {
         return ESP_OK;
     }
+    /* 协作式暂停用的两把信号量 (见 foc_motor_pause_loop) */
+    if (!s_loop_pause_sem) {
+        s_loop_pause_sem = xSemaphoreCreateBinary();
+        s_loop_resume_sem = xSemaphoreCreateBinary();
+        ESP_RETURN_ON_FALSE(s_loop_pause_sem && s_loop_resume_sem, ESP_ERR_NO_MEM,
+                            TAG, "pause sem create failed");
+    }
     s_loop_run = true;
     /* C6 只有一个应用核, 绑核无意义 —— 靠**优先级**抢占。
      * FOC 循环用最高优先级, 日志/命令台走低优先级。 */
@@ -278,28 +343,44 @@ foc_mode_t foc_motor_get_mode(void)
 
 void foc_motor_move_to(float normalized)
 {
-    if (!s_motor) {
-        return;
-    }
+    /* 应用语义上的开度 = 夹在 [0,1] 之内 (0 = 全关 / 1 = 全开)。
+     * 需要越过零点或超出满行程点 (探边/调试) 走 move_to_ext()。 */
     if (normalized < 0.0f) {
         normalized = 0.0f;
     }
     if (normalized > 1.0f) {
         normalized = 1.0f;
     }
+    (void)foc_motor_move_to_ext(normalized);
+}
+
+esp_err_t foc_motor_move_to_ext(float normalized)
+{
+    if (!s_motor) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_position_trusted) {
         /* 位置不可信时拒绝执行位置指令 —— 否则会以错误的基准冲到机械限位。
          * 由 homing 流程负责先建立基准。 */
         ESP_LOGW(TAG, "位置不可信, 拒绝位置指令 (需先回零)");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
-    /* 行程限位优先用回零自学习到的值 (存 NVS); 没有才退回 Kconfig 占位 */
-    float min_a = (s_range_max > s_range_min) ? s_range_min
-                                              : cfg_float(CONFIG_FOCSTEP_ENCODER_MIN_ANGLE, 0.0f);
-    float max_a = (s_range_max > s_range_min) ? s_range_max
-                                              : cfg_float(CONFIG_FOCSTEP_ENCODER_MAX_ANGLE, _2PI);
-    s_target_rad = min_a + normalized * (max_a - min_a);
+    if (s_range_state != RANGE_BOTH) {
+        /* ★ "全开/全关"只在**零点 + 满行程点都标定**后才生效 —— 缺一个就不做任何
+         *   开度推断 (旧的"退回 Kconfig 占位角"行为已删除: 占位角与实际机构无关,
+         *   照它跑等于用错误基准冲机械限位)。 */
+        ESP_LOGW(TAG, "行程不完整 (%s) ⇒ 拒绝开度指令: 先标零点与满行程点",
+                 foc_motor_range_state_str(s_range_state));
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (normalized < 0.0f || normalized > 1.0f) {
+        ESP_LOGW(TAG, "★ 越界开度 %.3f ⇒ 越过零点/超出满行程点, 机构会顶到机械限位",
+                 (double)normalized);
+    }
+    /* span 带符号 ⇒ 反装机构 ("零点"的角比"满行程点"更大) 不需要任何特殊处理 */
+    s_target_rad = s_zero_rad + normalized * (s_end_rad - s_zero_rad);
     s_mode = FOC_MODE_POSITION;
+    return ESP_OK;
 }
 
 void foc_motor_stop(void)
@@ -394,6 +475,99 @@ esp_err_t foc_motor_encoder_set_mode(uint8_t cmd)
     return s_encoder->set_mode((uint8_t)(cmd | KTH5701_AXIS_ALL));
 }
 
+/* ── 轻睡档支持 (Kconfig FOCSTEP_SLEEP_MODE_LIGHT) ────────────── */
+
+void foc_motor_pause_loop(void)
+{
+    if (!s_loop_task || s_loop_paused) {
+        return;
+    }
+    s_loop_pause_req = true;
+
+    /* 等循环自己走到安全点并交还控制权 (最多 ~2 个 FOC 周期)。
+     * 等不到说明它卡在 I2C 里了 —— 此时 vTaskSuspend 只是兜底,
+     * 并且值得打一条警告 (清 INT 可能因此失败)。 */
+    if (s_loop_pause_sem &&
+        xSemaphoreTake(s_loop_pause_sem, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ESP_LOGI(TAG, "FOC 任务已暂停 (协作式, 不持锁)");
+    } else {
+        ESP_LOGW(TAG, "FOC 循环 50ms 未响应, 兜底挂起 (可能正卡在 I2C)");
+        vTaskSuspend(s_loop_task);
+        s_paused_by_suspend = true;
+        s_loop_paused = true;
+    }
+}
+
+void foc_motor_resume_loop(void)
+{
+    if (!s_loop_task || !s_loop_paused) {
+        return;
+    }
+    if (s_paused_by_suspend) {
+        s_paused_by_suspend = false;
+        s_loop_pause_req = false;
+        s_loop_paused = false;
+        vTaskResume(s_loop_task);
+    } else {
+        s_loop_pause_req = false;
+        if (s_loop_resume_sem) {
+            xSemaphoreGive(s_loop_resume_sem); /* 循环自己继续, 并重置时间基 */
+        }
+    }
+    ESP_LOGI(TAG, "FOC 任务已恢复 (时间基将重置)");
+}
+
+bool foc_motor_encoder_clear_int(void)
+{
+    if (!s_encoder) {
+        return false;
+    }
+    /* 手册语义: **读一次数据即清零** —— 读测量帧就是"清锁存"的动作 */
+    uint8_t buf[KTH5701_XY_FRAME_LEN];
+    size_t len = sizeof(buf);
+    esp_err_t ret = s_encoder->data_read(KTH5701_AXIS_XY, buf, &len);
+
+    vTaskDelay(pdMS_TO_TICKS(2)); /* 给芯片时间把 INT 拉低 */
+    bool low = (gpio_get_level((gpio_num_t)PIN_ENCODER_INT) == 0);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读数据清 INT 失败: %s (INT=%d)", esp_err_to_name(ret), (int)!low);
+    }
+    return low;
+}
+
+void foc_motor_mark_sleep_angle(void)
+{
+    if (!s_encoder) {
+        return;
+    }
+    s_sleep_angle = s_encoder->get_mech_angle();
+    s_sleep_angle_valid = true;
+    ESP_LOGI(TAG, "睡前单圈角 %.3f rad (轻睡醒来比对用, 不写 NVS)", (double)s_sleep_angle);
+}
+
+esp_err_t foc_motor_check_sleep_angle(void)
+{
+    if (!s_encoder) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_sleep_angle_valid) {
+        ESP_LOGW(TAG, "没有睡前角度记录, 跳过轻睡一致性检查");
+        return ESP_ERR_INVALID_STATE;
+    }
+    float delta = angle_delta(s_encoder->get_mech_angle(), s_sleep_angle);
+    s_sleep_angle_valid = false;
+
+    if (delta > (float)CONFIG_FOCSTEP_POS_TRUST_TOL_MRAD / 1000.0f) {
+        s_position_trusted = false;
+        ESP_LOGW(TAG, "轻睡期间单圈角变化 %.3f rad (超容差 %d mrad) ⇒ 多圈计数不可信, 需要回零",
+                 (double)delta, CONFIG_FOCSTEP_POS_TRUST_TOL_MRAD);
+    } else {
+        ESP_LOGI(TAG, "轻睡期间单圈角偏差 %.4f rad ✓ 位置仍可信 (turns=%" PRIi32 ")",
+                 (double)delta, s_encoder->get_turns());
+    }
+    return ESP_OK;
+}
+
 /* ── 位置持久化 ────────────────────────────────────────────────
  * 存 **(圈数, 当时的单圈角)** 一对。
  *
@@ -418,12 +592,26 @@ esp_err_t foc_motor_save_position(void)
     if (ret == ESP_OK) {
         ret = nvs_set_i32(h, NVS_KEY_ANGLE_MRAD, a);
     }
-    /* 一并存行程限位与可信标志 */
+    /* 一并存行程 (两个绝对角 + 三态)、它的"指纹"(方向+零位)与可信标志 */
     if (ret == ESP_OK) {
-        ret = nvs_set_i32(h, NVS_KEY_RANGE_MIN, (int32_t)(s_range_min * 1000.0f));
+        ret = nvs_set_i32(h, NVS_KEY_RANGE_ZERO, (int32_t)(s_zero_rad * 1000.0f));
     }
     if (ret == ESP_OK) {
-        ret = nvs_set_i32(h, NVS_KEY_RANGE_MAX, (int32_t)(s_range_max * 1000.0f));
+        ret = nvs_set_i32(h, NVS_KEY_RANGE_END, (int32_t)(s_end_rad * 1000.0f));
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_u8(h, NVS_KEY_RANGE_ST, (uint8_t)s_range_state);
+    }
+    /* 顺手清掉旧口径 (按角度排序的 min/max) 的两个键: 已被 (零点, 满行程点) 取代,
+     * 留着只会让后来的人误读。不存在时返回 NOT_FOUND, 属正常 —— 别让它冲掉 ret。 */
+    (void)nvs_erase_key(h, NVS_KEY_RANGE_MIN_OLD);
+    (void)nvs_erase_key(h, NVS_KEY_RANGE_MAX_OLD);
+    if (ret == ESP_OK) {
+        ret = nvs_set_i8(h, NVS_KEY_ENC_DIR, (int8_t)CONFIG_FOCSTEP_ENCODER_DIRECTION);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_i32(h, NVS_KEY_ENC_ZERO,
+                          (int32_t)(cfg_float(CONFIG_FOCSTEP_ENCODER_ZERO_OFFSET, 0.0f) * 1000.0f));
     }
     if (ret == ESP_OK) {
         ret = nvs_set_u8(h, NVS_KEY_TRUSTED, s_position_trusted ? 1 : 0);
@@ -433,8 +621,10 @@ esp_err_t foc_motor_save_position(void)
     }
     nvs_close(h);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "位置已存: turns=%" PRIi32 " angle=%.3f rad trusted=%d",
-                 t, (double)s_encoder->get_mech_angle(), (int)s_position_trusted);
+        ESP_LOGI(TAG, "位置已存: turns=%" PRIi32 " angle=%.3f rad trusted=%d 行程: 零点 %.3f / "
+                      "满行程点 %.3f (%s)",
+                 t, (double)s_encoder->get_mech_angle(), (int)s_position_trusted,
+                 (double)s_zero_rad, (double)s_end_rad, foc_motor_range_state_str(s_range_state));
     }
     return ret;
 }
@@ -466,9 +656,18 @@ esp_err_t foc_motor_restore_position(void)
         return ESP_OK;
     }
     nvs_get_u8(h, NVS_KEY_TRUSTED, &trusted);
-    int32_t rmin = 0, rmax = 0;
-    bool has_range = (nvs_get_i32(h, NVS_KEY_RANGE_MIN, &rmin) == ESP_OK &&
-                      nvs_get_i32(h, NVS_KEY_RANGE_MAX, &rmax) == ESP_OK);
+    uint8_t rstate = (uint8_t)RANGE_NONE;
+    int32_t rzero = 0, rend = 0;
+    nvs_get_u8(h, NVS_KEY_RANGE_ST, &rstate);
+    /* 三态非 NONE 才算有行程; 两个端点必须都读得到, 否则当未标定处理 */
+    bool has_range = (rstate != (uint8_t)RANGE_NONE &&
+                      nvs_get_i32(h, NVS_KEY_RANGE_ZERO, &rzero) == ESP_OK &&
+                      nvs_get_i32(h, NVS_KEY_RANGE_END, &rend) == ESP_OK);
+    /* 行程的"指纹": 标定时用的编码器方向与零位 */
+    int8_t saved_dir = 0;
+    int32_t saved_zero = 0;
+    bool has_meta = (nvs_get_i8(h, NVS_KEY_ENC_DIR, &saved_dir) == ESP_OK &&
+                     nvs_get_i32(h, NVS_KEY_ENC_ZERO, &saved_zero) == ESP_OK);
     nvs_close(h);
 
     s_encoder->set_turns(t);
@@ -479,14 +678,47 @@ esp_err_t foc_motor_restore_position(void)
      *   (根本歧义: 单圈绝对传感器分不清 0.3 圈与 1.3 圈, 见 foc_motor.h) */
     float saved_angle = (float)a / 1000.0f;
     float now_angle = s_encoder->get_mech_angle();
-    float delta = fabsf(now_angle - saved_angle);
-    if (delta > _2PI - delta) {
-        delta = _2PI - delta; /* 取最小的角度差 */
-    }
+    float delta = angle_delta(now_angle, saved_angle);
 
     if (has_range) {
-        s_range_min = (float)rmin / 1000.0f;
-        s_range_max = (float)rmax / 1000.0f;
+        /* ★★ 行程一致性检查 (比单圈角检查更硬): 行程是"编码器机械角坐标系"里的端点,
+         *    而该坐标系由 ENCODER_DIRECTION + ENCODER_ZERO_OFFSET 定义。
+         *    这两个值一改 (固件重编/换装磁铁/重装机构), 旧行程就不再对应机械端点。
+         *    这里直接**作废**, 而不是静默沿用 —— 否则会"能跑但整段错位",
+         *    现场极难发现。作废后必须重新标定 (learn / mark)。 */
+        const int8_t cur_dir = (int8_t)CONFIG_FOCSTEP_ENCODER_DIRECTION;
+        const int32_t cur_zero =
+            (int32_t)(cfg_float(CONFIG_FOCSTEP_ENCODER_ZERO_OFFSET, 0.0f) * 1000.0f);
+        if (!has_meta || saved_dir != cur_dir || saved_zero != cur_zero) {
+            ESP_LOGE(TAG, "行程作废: 标定时 dir=%d zero=%d mrad, 现在 dir=%d zero=%d mrad "
+                          "⇒ 编码器方向/零位变过, 旧的行程不再对应机械端点, 必须重标定",
+                     (int)saved_dir, (int)saved_zero, (int)cur_dir, (int)cur_zero);
+            s_range_state = RANGE_NONE;
+            s_zero_rad = 0.0f;
+            s_end_rad = 0.0f;
+            s_position_trusted = false;
+            return ESP_OK; /* 行程 + 位置都不可用, 等重新标定 */
+        }
+        s_zero_rad = (float)rzero / 1000.0f;
+        s_end_rad = (float)rend / 1000.0f;
+        s_range_state = (range_state_t)rstate;
+        /* BOTH 但两端几乎重合 ⇒ NVS 内容自相矛盾 (旧固件残留 / 写入中断), 作废重标 */
+        if (s_range_state == RANGE_BOTH &&
+            fabsf(s_end_rad - s_zero_rad) < FOC_MOTOR_MIN_SPAN_RAD) {
+            ESP_LOGE(TAG, "行程作废: 恢复出的零点/满行程点几乎重合 (%.3f / %.3f rad) "
+                          "⇒ NVS 内容不一致, 必须重标定",
+                     (double)s_zero_rad, (double)s_end_rad);
+            s_range_state = RANGE_NONE;
+            s_zero_rad = 0.0f;
+            s_end_rad = 0.0f;
+            s_position_trusted = false;
+            return ESP_OK;
+        }
+        ESP_LOGI(TAG, "行程已恢复: 零点 %.3f / 满行程点 %.3f rad (span %.3f, %s, dir=%d zero=%d mrad)",
+                 (double)s_zero_rad, (double)s_end_rad, (double)(s_end_rad - s_zero_rad),
+                 foc_motor_range_state_str(s_range_state), (int)saved_dir, (int)saved_zero);
+    } else if (rstate != (uint8_t)RANGE_NONE) {
+        ESP_LOGW(TAG, "行程状态是 %u 但端点读不齐 ⇒ 按未标定处理, 需要重标", (unsigned)rstate);
     }
 
     if (!trusted) {
@@ -567,19 +799,140 @@ float foc_motor_default_voltage_limit(void)
     return cfg_float(CONFIG_FOCSTEP_VOLTAGE_LIMIT, 12.0f);
 }
 
-void foc_motor_set_travel_range(float min_rad, float max_rad)
+const char *foc_motor_range_state_str(range_state_t st)
 {
-    s_range_min = min_rad;
-    s_range_max = max_rad;
-    ESP_LOGI(TAG, "行程限位: [%.3f, %.3f] rad", (double)min_rad, (double)max_rad);
+    switch (st) {
+    case RANGE_NONE:
+        return "未标定";
+    case RANGE_ZERO_ONLY:
+        return "只有零点";
+    case RANGE_BOTH:
+        return "零点+满行程点";
+    default:
+        return "?";
+    }
 }
 
-void foc_motor_get_travel_range(float *min_rad, float *max_rad)
+range_state_t foc_motor_range_state(void)
 {
-    if (min_rad) {
-        *min_rad = s_range_min;
+    return s_range_state;
+}
+
+bool foc_motor_has_range(void)
+{
+    /* "有行程" = 完整标定 (BOTH)。只有零点时开度无从定义, 不算有行程 */
+    return (s_range_state == RANGE_BOTH);
+}
+
+/*
+ * 行程写入的唯一入口 (set_zero / set_end 共用)。
+ *
+ * ★ 决定 #6: **只改被标定的那一端, 另一端的物理位置保持不动。**
+ *   存的是两个绝对角 ⇒ 重标零点时满行程点的值自然"基于新零点重新计算"
+ *   (span 是算出来的, 不是存下来的)。
+ *
+ * 校验: 跨度必须 ≥ FOC_MOTOR_MIN_SPAN_RAD, 否则判定标错了端 (或方向不对),
+ *       拒绝写入 —— 什么都不改, 旧的标定继续有效。
+ */
+static esp_err_t range_commit(bool mark_zero, float rad)
+{
+    if (!mark_zero && s_range_state == RANGE_NONE) {
+        /* 三态里没有"有行程无零点" —— 没有零点, 100% 开度就无从定义 */
+        ESP_LOGE(TAG, "还没有零点 ⇒ 拒绝先标满行程点 (行程得有零点才是行程)");
+        return ESP_ERR_INVALID_STATE;
     }
-    if (max_rad) {
-        *max_rad = s_range_max;
+
+    float zero, end;
+    range_state_t next;
+    if (mark_zero) {
+        zero = rad;
+        /* 已有满行程点时它**不动**; 否则另一端还不存在 (跨度无从谈起) */
+        end = (s_range_state == RANGE_BOTH) ? s_end_rad : rad;
+        next = (s_range_state == RANGE_BOTH) ? RANGE_BOTH : RANGE_ZERO_ONLY;
+    } else {
+        zero = s_zero_rad;
+        end = rad;
+        next = RANGE_BOTH;
+    }
+
+    if (next == RANGE_BOTH && fabsf(end - zero) < FOC_MOTOR_MIN_SPAN_RAD) {
+        ESP_LOGE(TAG, "标定被拒: 零点 %.3f / 满行程点 %.3f 跨度 %.3f < 最小 %.3f ⇒ "
+                      "两端标反了或机构有问题 (本次不做任何修改)",
+                 (double)zero, (double)end, (double)fabsf(end - zero),
+                 (double)FOC_MOTOR_MIN_SPAN_RAD);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* ★ 方向翻转告警: 原本已完整、这次落定却把 span 变号 ⇒ 0%/100% 与门开合的
+     *   对应关系被翻了过来 —— 那正是 dir invert 的语义。标定是有意的人为动作,
+     *   所以**只告警不拦** (误拦比告警更烦), 但必须让人看见。 */
+    if (s_range_state == RANGE_BOTH && next == RANGE_BOTH) {
+        float old_span = s_end_rad - s_zero_rad;
+        float new_span = end - zero;
+        if ((old_span > 0.0f) != (new_span > 0.0f)) {
+            ESP_LOGW(TAG, "⚠️ 本次标定把行程方向翻转了: span %.3f → %.3f ⇒ "
+                          "0%%/100%% 与门开合的对应关系随之互换。若非本意请复核方向; "
+                          "有意翻转建议改用 dir invert (等价且更直白)",
+                     (double)old_span, (double)new_span);
+        }
+    }
+
+    s_zero_rad = zero;
+    s_end_rad = end;
+    s_range_state = next;
+
+    /* ★ 标定即锚定: 被标的这一点是**实物基准点**, 所以此刻位置可信 (决定 #2)。
+     *   必须显式置位 —— 旧代码只把行程存进 NVS, 可信标志仍是 false, 于是
+     *   "标完还得复位一次让 restore 把可信标志读回来" (隐藏坑)。 */
+    s_position_trusted = true;
+    /* 停在原地保持, 并立刻落盘 (圈数 + 单圈角 + 行程 + 指纹 + 可信标志) */
+    foc_motor_set_target_rad(foc_motor_get_angle_rad());
+    foc_motor_save_position();
+
+    ESP_LOGW(TAG, "已标定%s = %.3f rad ⇒ 零点 %.3f / 满行程点 %.3f (span %.3f, %s)",
+             mark_zero ? "零点(0%)" : "满行程点(100%)", (double)rad,
+             (double)s_zero_rad, (double)s_end_rad, (double)(s_end_rad - s_zero_rad),
+             foc_motor_range_state_str(s_range_state));
+    return ESP_OK;
+}
+
+esp_err_t foc_motor_set_zero(float rad)
+{
+    return range_commit(true, rad);
+}
+
+esp_err_t foc_motor_set_end(float rad)
+{
+    return range_commit(false, rad);
+}
+
+esp_err_t foc_motor_invert_travel(void)
+{
+    if (s_range_state != RANGE_BOTH) {
+        ESP_LOGE(TAG, "行程不完整 (%s) ⇒ 不能反向 (反向 = 交换零点与满行程点)",
+                 foc_motor_range_state_str(s_range_state));
+        return ESP_ERR_INVALID_STATE;
+    }
+    float tmp = s_zero_rad;
+    s_zero_rad = s_end_rad;
+    s_end_rad = tmp;
+    foc_motor_save_position();
+
+    ESP_LOGW(TAG, "行程已反向: 新零点 %.3f (原满行程点) / 新满行程点 %.3f (原零点), span %.3f "
+                  "⇒ 0%%/100%% 与正方向同时取反",
+             (double)s_zero_rad, (double)s_end_rad, (double)(s_end_rad - s_zero_rad));
+    return ESP_OK;
+}
+
+void foc_motor_get_range(float *zero_rad, float *end_rad, float *span_rad)
+{
+    if (zero_rad) {
+        *zero_rad = s_zero_rad;
+    }
+    if (end_rad) {
+        *end_rad = s_end_rad;
+    }
+    if (span_rad) {
+        *span_rad = s_end_rad - s_zero_rad; /* 带符号 */
     }
 }

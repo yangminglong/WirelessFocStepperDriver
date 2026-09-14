@@ -13,6 +13,25 @@ menu "FocStepper 推拉门应用"
             help
                 PA 载荷寻址用。0 在协议里表示广播给所有板, 故本板 ID 不可为 0。
 
+        config FOCSTEP_PA_BOOT_LISTEN
+            bool "上电即开无线监听"
+            default y
+            help
+                出厂行为: 上电进入 PA 监听窗口 (可被远程唤醒/开关停)。
+                关掉它则只有命令台 `wake pa` (或将来的 CAN 指令) 才开监听。
+                监听能力本身由平台层的 FOCSTEP_PA_WAKE_ENABLE 决定。
+
+        config FOCSTEP_PA_LISTEN_HOLD_MS
+            int "无线监听窗口 (ms, 无活动则自动关闭)"
+            range 60000 3600000
+            default 600000
+            help
+                窗口内可被远程唤醒。超时无"活动"就关监听、回落 µA 档深睡
+                (此后只能本地唤醒)。
+                **活动** = 收到本机非心跳指令 / 本地手拉 / 按键 / CAN / 命令台。
+                ⚠️ 发送端的心跳**不算**活动 —— 否则窗口永不回落。
+                本地唤醒后会重新开一个窗口 (人在现场 ⇒ 往往也要远程可达)。
+
         config FOCSTEP_IDLE_TO_SLEEP_MS
             int "无动作后进入深睡的时间 (ms)"
             range 1000 600000
