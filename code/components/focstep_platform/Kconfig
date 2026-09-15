@@ -118,15 +118,15 @@ menu "FocStepper 平台层"
             help
                 ⚠️ **正常打样不需要打开。**
 
-                docs/doc.md v0.7 已定线: DRV8874 引脚名即 EN/IN1、PH/IN2,
-                **EN 在 IN1 脚上、PH 在 IN2 脚上**; 本板 GPIO10/14 = IN1(EN)、
-                GPIO11/15 = IN2(PH)。默认分支与原理图一致。
+                docs/doc.md 已定线: DRV8874 引脚名即 EN/IN1、PH/IN2,
+                **EN 在 IN1 脚上、PH 在 IN2 脚上**; 本板 GPIO19/21 = IN1(EN)、
+                GPIO20/22 = IN2(PH)。默认分支与原理图一致。
 
                 PH/EN 模式下**只有 EN=0 是 Brake**。若原理图把两根接反,
                 "先切 brake"会变成 "EN 仍为 1、PH=0" = 满压反转驱动 —— 唤醒瞬间猛冲。
 
-                默认(关) = EN 认在 IN1 = GPIO10/14 (与原理图一致)
-                打开     = EN 认在 IN2 = GPIO11/15 (接反救回, 不必重画板)
+                默认(关) = EN 认在 IN1 = GPIO19/21 (与原理图一致)
+                打开     = EN 认在 IN2 = GPIO20/22 (接反救回, 不必重画板)
 
                 验线方法: `brake` 命令 → 两相 EN 拉低后手转轴,
                 应有明显阻尼且电机不主动转。
@@ -392,7 +392,12 @@ menu "FocStepper 平台层"
             range 1 20
             default 2
             help
-                源阻抗 7.6kΩ × 10nF ⇒ τ=76µs。取 2ms 远大于 5τ, 保证建立完成。
+                源阻抗 7.6kΩ × 1nF ⇒ τ=7.6µs, 5τ≈38µs。2ms 远大于 5τ, 保证建立完成。
+                ⚠️ **但这 2ms 同时是分压支路的主要待机开销**: 导通期间 108.2k 分压
+                持续吸 VM/108.2k ≈ 233µA @25.2V。doc.md §六 的模型 (E≈0.35·VM²·C)
+                等价于"只导通 5τ" ⇒ @100Hz 得 0.84µA@24V; 而**实际导通 2ms 时是
+                48µA@24V —— 差 52 倍**。要真按 100Hz 跑 LP 核母线监测, 必须把等待
+                改成 µs 级 (见 bus_voltage.c), 或降低测量频率。
                 ⚠️ 门控只允许做在**高边**。若开关串在 8.2k 下方, 关断时上臂会把
                 ADC 节点抬到 VM 电位 (24V), 超引脚耐压并有损伤风险。
 
@@ -401,7 +406,7 @@ menu "FocStepper 平台层"
             default y
             help
                 GPIO7 输出高 = P-MOS 导通 = 分压接入。
-                ⚠️ 配错会导致常态耗 5.3mW, 推翻 0.25mW 待机基线。
+                ⚠️ 配错会导致常态耗 5.3mW, 推翻深睡档待机基线 (25~65µA@24V)。
                 上板第一件事: 门控关断时量 ADC 节点应为 0V (被 8.2k 拉到地)。
 
         config FOCSTEP_VBUS_MIN_ENABLE_MV
@@ -420,15 +425,35 @@ menu "FocStepper 平台层"
     menu "CAN 总线"
 
         config FOCSTEP_CAN_ENABLE
-            bool "启用 CAN"
-            default y
+            bool "启用 CAN (⚠️ 会顶掉 UART0 的 4P 调试口)"
+            default n
+            help
+                ⚠️ **这个开关不是"开/关一个功能", 而是"选哪一档"** —— 因为 TWAI 与
+                UART0 抢占**同一对 GPIO16/17** (收发器与 4P 调试排针共用, docs/doc.md §5.3):
+
+                  关闭 (**默认, 调试档**): UART0 控制台在 GPIO16/17 ⇒ **4P 排针可用**,
+                                           CAN 不工作。此时收发器的 RXD 仍挂在 GPIO17 上
+                                           (靠那颗 1.5kΩ 隔离, 见 §5.3)。
+
+                  打开 (CAN 档):  TWAI 占用 GPIO16/17 ⇒ **必须同时把控制台改到
+                                  USB-Serial-JTAG**, 否则日志出不去:
+                                    CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+                                      → CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+                                    CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n → y
+                                    + CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+
+                ⇒ **两档是配套的, 只改一半会得到"日志消失"或"CAN 不通"。**
+                建议再加 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y,
+                这样默认档下 Type-C 也能看日志 (只读镜像), 不必来回换档。
+
+                完整依据、代价与使用纪律见 docs/doc.md §5.3。
 
         config FOCSTEP_CAN_BITRATE
             int "CAN 波特率 (bit/s)"
             default 500000
             help
-                ⚠️ **docs/doc.md 全文未提及 CAN 波特率** —— 这是本次新增的占位项。
-                默认 500k (工业控制常用)。定稿前请确认。
+                ⚠️ **docs/doc.md 尚未定 CAN 波特率** —— 500k 是占位值, 已列为
+                **§9.1 #3 待拍板**。需按线长 / 节点数 / 板载终端形式 (分裂 2×60Ω) 定稿。
 
         config FOCSTEP_CAN_NO_ACK
             bool "TWAI 无 ACK 模式 (单板 bring-up)"
@@ -575,13 +600,15 @@ menu "FocStepper 平台层"
             default FOCSTEP_SLEEP_MODE_DEEP
             help
                 板级"深睡"(power_state = PS_SLEEP) 用哪种 MCU 睡眠实现。
-                两者对 nSLEEP / CAN Rs / WS2812 三根控制脚的**取值要求完全相同**,
+                两者对控制脚的取值要求完全相同 —— 注意现在**只剩 nSLEEP(GPIO18) 一根**:
+                WS2812 门控已移除 (§五.2), CAN 的 Rs 又挂在这根 nSLEEP 的派生网络上
+                (§5.3), 所以 §10.3 那张表的控制脚列只剩它一个真变量,
                 差别全在 MCU 侧 (docs/doc.md §5.6 / §10.3):
 
                 - DeepSleep: 功耗最低 (~10µA), 唤醒即复位 ⇒ 从 app_main 重跑,
                   位置靠 NVS 恢复; GPIO 浮空 ⇒ 靠外部上下拉维持安全电平。
                 - LightSleep: 唤醒不复位 (GPIO 保持、RAM 保留、唤醒快),
-                  **但待机电流高于 DeepSleep ⇒ §六 的 0.25mW 口径要按实测重算**。
+                  **但待机电流高于 DeepSleep ⇒ §六 的深睡档口径 (25~65µA@24V) 要按实测重算**。
                   代码侧另有两条硬要求 (已实现, 见 foc_motor.h / wakeup.h):
                     · 醒来必须**读一次编码器数据清 INT 锁存**, 否则被同一次中断立刻重复唤醒;
                     · 唤醒后要重做"位置是否可信"判定 (睡着期间可能被手拉动)。

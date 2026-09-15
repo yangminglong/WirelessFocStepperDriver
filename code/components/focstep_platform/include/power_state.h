@@ -9,16 +9,22 @@
  * |ACTIVE| 高     | 连续测量        |可用   |
  * |FAULT | 低     | 保持            |断电   |
  *
- * ★★ 为什么 `nSLEEP` 是本模块的**唯一职责核心**:
+ * ★★ 为什么 `nSLEEP` 是本模块的**唯一职责核心** —— 这一根脚上挂了**三件事**:
  *
  *  1. **VREF 门控由 nSLEEP 硬件驱动** (docs/doc.md §五.4)。DRV8874 的 VREF 由
- *     10k+22k 从 3.4V 分压产生, 该分压原方案无门控、常态耗 **106µA ≈ 0.42mW@24V**,
- *     是整机待机预算 (0.25mW) 的 **1.7 倍**。改法是给分压加高边 P-MOS, 栅极由
- *     GPIO16 (nSLEEP) 经 NPN 驱动。**⇒ 固件侧零改动, 但 SLEEP/FAULT 态必须真正
- *     拉低 nSLEEP, 否则 P-MOS 不关断, 那 106µA 照烧, 待机预算当场破。**
- *  2. **nFAULT 必须立即拉低 nSLEEP** (§10.4 ③)。
+ *     10k+22k 从 3.4V 分压产生, 该分压原方案无门控、常态耗 **106µA @3.4V**
+ *     (折算 24V 输入侧 ≈17.6µA ≈ 0.42mW), 占深睡档基线 (25~65µA@24V) 的
+ *     **27~70%**。改法是给分压加高边 P-MOS, 栅极由
+ *     **GPIO18 (nSLEEP)** 经 NPN 驱动 (基极 100k, 使能态仅 26µA)。**⇒ 固件侧零改动,
+ *     但 SLEEP/FAULT 态必须真正拉低 nSLEEP, 否则 P-MOS 不关断, 那 106µA 照烧,
+ *     待机预算当场破。**
+ *  2. **CAN 收发器的 Rs 挂在同一颗 NPN 的集电极上** (docs/doc.md §5.3) ⇒
+ *     nSLEEP 高 = Rs 低 = **CAN 唤醒**;  nSLEEP 低 = Rs 高 = **CAN 睡眠**。
+ *     **⇒ CAN 的醒睡由这里间接决定, 软件无法独立控制** —— 这正是本模块 (以及
+ *       整个固件) **没有 can_set_active()** 的原因。上电默认 nSLEEP=低 ⇒ CAN 默认睡眠。
+ *  3. **nFAULT 必须立即拉低 nSLEEP** (§10.4 ③)。
  *
- * ⚠️ 因此: **本文件是 GPIO16 的唯一写入方**。任何其他模块都不得直接操作 nSLEEP。
+ * ⚠️ 因此: **本文件是 GPIO18 的唯一写入方**。任何其他模块都不得直接操作 nSLEEP。
  *
  * ── 与重构前的变化 ────────────────────────────────────────────
  * 原来这里有一张 `power_state_hooks_t` 函数指针表, 由应用注入。
@@ -26,13 +32,13 @@
  * ② 平台内部模块之间也要绕道钩子, 平白多一层。
  *
  * 现在: **平台内部直接互相调用** (`foc_motor_enable()` / `bus_voltage_read_mv()` /
- * `can_set_active()` / `gpio_get_level()`), 应用则订阅事件。
+ * `gpio_get_level()`), 应用则订阅事件。
  *
  * ── 应用怎么接 ────────────────────────────────────────────────
- *   · 订阅 `FOCSTEP_EVT_STATE_CHANGED` 决定灯色、CAN Rs、电机行为
+ *   · 订阅 `FOCSTEP_EVT_STATE_CHANGED` 决定灯色与电机行为
  *   · 深睡策略(何时睡)、手拉助动、开关停语义 都在应用层
  *   · `§10.3` 的四态是**应用概念**: 唤醒接管/运行 是 ACTIVE 的两种子模式,
- *     差别在"电机做什么 + CAN Rs", 两者都由应用控制
+ *     差别在"电机做什么", 由应用控制
  */
 
 #include <stdbool.h>
@@ -71,9 +77,8 @@ void power_state_request(power_state_t want);
 void power_state_clear_fault(void);
 void power_state_on_fault(uint8_t code);
 
-/* CAN 收发器使能 (Rs)。§10.3: 唤醒接管=睡眠, 运行=工作。
- * 是**应用**决定何时切, 平台只提供接口。 */
-void power_state_set_can_active(bool active);
+/* ★ 没有 power_state_set_can_active() —— CAN 的醒睡由 nSLEEP 硬件派生,
+ *   软件无法独立控制 (见文件头第 2 条, 以及 docs/doc.md §5.3)。 */
 
 power_state_t power_state_current(void);
 const char *power_state_name(power_state_t s);

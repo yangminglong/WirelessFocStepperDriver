@@ -21,8 +21,8 @@
  *      **continuous current monitoring**"*。⇒ IPROPI 连续, 无需对齐 PWM 采样窗口。
  *
  *      附带好处: 慢衰减的电流纹波更小 (对齐 §10.4 的"无异响"), 且 LEDC 占用 4→2 路。
- *      **引脚完全不变**: GPIO10/11/14/15 本来就是每片一 EN 一 PH。
- *      ⚠️ PMODE (GPIO6) 必须保持**低**。doc §五.4 定稿"上电默认低（PH/EN 安全态）", 与本设计一致。
+ *      每片一 EN 一 PH: **GPIO19/21 = EN、GPIO20/22 = PH**。
+ *      ⚠️ PMODE (**GPIO23**) 必须保持**低**。doc §五.4 定稿"上电默认低（PH/EN 安全态）", 与本设计一致。
  *
  * ★ 2. 力矩环用 `TorqueControlType::estimated_current` (需实测 phase_resistance)。
  *      事实边界 (已核对源码):

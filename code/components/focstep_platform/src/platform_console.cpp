@@ -238,7 +238,8 @@ static int do_vref(int argc, char **argv)
         return 1;
     }
     int on = atoi(argv[1]);
-    /* ⚠️ 这里直接写 GPIO16 仅用于**自检**。正常运行期 GPIO16 由 power_state.c 独占。 */
+    /* ⚠️ 这里直接写 GPIO18 仅用于**自检**。正常运行期 GPIO18 由 power_state.c 独占
+     *    —— 它一根脚管三件事: DRV 使能 / VREF 门控 / CAN 的 Rs (docs/doc.md §5.3)。 */
     gpio_set_level((gpio_num_t)PIN_DRV_nSLEEP, on ? 1 : 0);
     printf("nSLEEP(GPIO%d) → %d\n", PIN_DRV_nSLEEP, on);
     if (on) {
@@ -246,8 +247,8 @@ static int do_vref(int argc, char **argv)
         printf("⚠️ 抬 nSLEEP 前务必先跑 brake 命令验 EN/PH 接法!\n");
     } else {
         printf("请量 **VREF 引脚** = 0V。\n");
-        printf("这一态若不为 0, 说明 P-MOS 门控没关断 ⇒ 分压持续耗 106µA ≈ 0.42mW@24V,\n"
-               "是整机 0.25mW 待机预算的 1.7 倍。\n");
+        printf("这一态若不为 0, 说明 P-MOS 门控没关断 ⇒ 分压持续耗 106µA@3.4V\n"
+               "(折算 24V 输入侧 ≈17.6µA), 占深睡档基线 (25~65µA@24V) 的 27~70%。\n");
     }
     return 0;
 }
@@ -260,7 +261,7 @@ static int do_brake(int argc, char **argv)
     foc_motor_brake();
     printf("两相 EN 已拉低 = Brake (低边慢衰减)。\n");
     printf("★ 现在用手转轴, 应该有**明显阻尼**, 且电机**不会主动往一个方向转**。\n");
-    printf("  若电机使劲朝一个方向转 ⇒ 两根接反了 (GPIO10/14 实际接到 IN2/PH),\n"
+    printf("  若电机使劲朝一个方向转 ⇒ 两根接反了 (GPIO19/21 实际接到 IN2/PH),\n"
            "  打开 Kconfig 的 FOCSTEP_PHEN_SWAPPED 重烧再试 (台面救回, 不必重画板)。\n");
     return 0;
 }

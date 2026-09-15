@@ -7,8 +7,9 @@
  *   main/app_console.c             应用命令
  *   本文件                          只做初始化和任务编排, 不含业务逻辑
  *
- * ⚠️ 本文件**不得直接操作 GPIO16 (nSLEEP)** —— 那是平台 power_state.c 的独占职责,
- *    因为它同时硬件门控 VREF 分压 (关不断就常态耗 106µA ≈ 0.42mW@24V)。
+ * ⚠️ 本文件**不得直接操作 GPIO18 (nSLEEP)** —— 那是平台 power_state.c 的独占职责,
+ *    因为它同时硬件门控 **VREF 分压** (关不断就常态耗 106µA ≈ 0.42mW@24V)
+ *    与 **CAN 收发器的 Rs** (docs/doc.md §5.3) —— **一根脚管三件事**。
  */
 
 #include <stdio.h>
@@ -70,8 +71,13 @@ void app_main(void)
     ESP_ERROR_CHECK(led_init());
     /* 按键: 只发事件 */
     ESP_ERROR_CHECK(platform_button_init());
-    /* CAN: 上电默认睡眠 (Rs 高) */
+    /* CAN: 上电默认睡眠**由硬件保证** (Rs 随 nSLEEP=低 ⇒ 高 ⇒ 睡眠)。
+     * ⚠️ **只在"用 CAN 档"才初始化** —— TWAI 一装上就占用 GPIO16/17, 会把 UART0
+     *    控制台顶掉 (那两个脚与收发器是共用的, docs/doc.md §5.3)。该档的控制台
+     *    走 USB-Serial-JTAG。开关见 Kconfig 的 FOCSTEP_CAN_ENABLE。 */
+#if CONFIG_FOCSTEP_CAN_ENABLE
     ESP_ERROR_CHECK(can_init());
+#endif
     /* 唤醒源 (本地: 编码器 INT / 干接点) */
     ESP_ERROR_CHECK(wakeup_init());
 
@@ -134,7 +140,9 @@ void app_main(void)
 
     while (1) {
         power_state_tick();
+#if CONFIG_FOCSTEP_CAN_ENABLE
         can_tick();
+#endif
         app_door_tick();
         /* 注意: 灯不需要在这里 tick —— 闪灯时序由 led_indicator 自己的任务推进 */
 

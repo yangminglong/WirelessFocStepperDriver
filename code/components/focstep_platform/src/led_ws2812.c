@@ -147,47 +147,11 @@ static blink_step_t const *s_blink_lists[] = {
 };
 
 static led_indicator_handle_t s_led = NULL;
-static bool s_power_on = false;
 static bool s_inited = false;
-static int s_requested = LED_IDX_OFF; /* 最近一次请求的模式, 供电恢复后重放 */
 
-esp_err_t led_power(bool on)
-{
-    if (!s_inited) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (on == s_power_on) {
-        return ESP_OK;
-    }
-
-    if (on) {
-        /* 极性: P-MOS 源极接 3.3V, 栅极拉低 ⇒ Vgs=-3.3V ⇒ 导通。
-         * 故 GPIO8 **低 = 供电**, 高 = 断电 (doc.md §四: "上电=高(灯灭)")。
-         * 先供电, 等 WS2812 上电复位 (≥50µs, 这里给 2ms 余量), 再送数据。 */
-        ESP_RETURN_ON_ERROR(gpio_set_level((gpio_num_t)PIN_WS2812_PWR, 0),
-                            TAG, "pwr on failed");
-        vTaskDelay(pdMS_TO_TICKS(2));
-        s_power_on = true;
-        /* 断电期间 led_indicator 的模式状态是丢的, 恢复后重放一次 */
-        led_indicator_start(s_led, s_requested);
-    } else {
-        /* ⚠️ 纪律: 断电前必须先把 DIN 拉低, 否则 WS2812 会通过数据线寄生取电,
-         *    灯会微亮/乱闪, 且这部分电流不进 VDD 回路, 待机电流对不上账。 */
-        led_indicator_stop(s_led, s_requested);
-        led_indicator_set_on_off(s_led, false);
-        vTaskDelay(pdMS_TO_TICKS(2)); /* 等最后一帧移出去 */
-        gpio_set_level((gpio_num_t)PIN_WS2812_DIN, 0);
-        ESP_RETURN_ON_ERROR(gpio_set_level((gpio_num_t)PIN_WS2812_PWR, 1),
-                            TAG, "pwr off failed");
-        s_power_on = false;
-    }
-    return ESP_OK;
-}
-
-bool led_power_is_on(void)
-{
-    return s_power_on;
-}
+/* ★ 原 led_power() / led_power_is_on() 已随供电门控一并移除 (docs/doc.md §五.2):
+ *   WS2812B-2020-V6 静态电流 ≦1µA、3.4V 常供 ⇒ P-MOS 门控失去理由,
+ *   那个 GPIO8 也还给了 nFAULT。详见 led_ws2812.h 头注释。 */
 
 esp_err_t led_set_color(led_color_t color)
 {
@@ -198,19 +162,10 @@ esp_err_t led_set_color(led_color_t color)
     if (idx < 0 || idx >= LED_IDX_MAX) {
         idx = LED_IDX_OFF;
     }
-    s_requested = idx;
 
-    /* 灭灯: 直接断电, 不留任何漏电通路 */
-    if (idx == LED_IDX_OFF) {
-        if (s_power_on) {
-            return led_power(false);
-        }
-        return ESP_OK;
-    }
-
-    if (!s_power_on) {
-        return led_power(true); /* led_power 内部会重放 s_requested */
-    }
+    /* ★ "灭" 不再是断电, 而是**发一帧全黑**: s_st_off 先写 RGB=0 再置 OFF,
+     *   灯珠据此锁存全黑, 之后 IC 回到静态 ≦1µA。
+     *   ⚠️ **这是深睡不亮灯的唯一保障 —— 已无硬件兜底**, 见 led_ws2812.h 纪律 1。 */
     return led_indicator_start(s_led, idx);
 }
 
@@ -228,19 +183,8 @@ esp_err_t led_init(void)
         return ESP_OK;
     }
 
-    gpio_config_t io = {
-        .pin_bit_mask = (1ULL << PIN_WS2812_PWR) | (1ULL << PIN_WS2812_DIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "gpio config failed");
-
-    /* 上电安全态: 灯灭 (GPIO8 高 = 断电, 同时满足 strapping=1) */
-    gpio_set_level((gpio_num_t)PIN_WS2812_PWR, 1);
-    gpio_set_level((gpio_num_t)PIN_WS2812_DIN, 0);
-    s_power_on = false;
+    /* ★ 不再配置供电脚: 灯带 3.4V **常供**, DIN 交给下面 led_strip 的 RMT 通道。
+     *   (原 GPIO8 供电门控已移除 —— 该脚现为 nFAULT, 由 power_state.c 管。) */
 
     led_indicator_config_t cfg = {
         .blink_lists = s_blink_lists,
@@ -265,7 +209,9 @@ esp_err_t led_init(void)
     /* 亮度在颜色值之上再缩放一次, 双重限幅防"全白拉垮 Buck" */
     led_indicator_set_brightness(s_led, CONFIG_FOCSTEP_WS2812_BRIGHTNESS);
 
-    gpio_set_level((gpio_num_t)PIN_WS2812_DIN, 0);
+    /* ★ 上电安全态 = 灭。门控移除后**不再有"上电即断电"的硬件保障** ⇒
+     *   必须显式发一帧全黑。(V6 有"上电零闪", 上电瞬间本来也不会闪。) */
+    ESP_RETURN_ON_ERROR(led_indicator_start(s_led, LED_IDX_OFF), TAG, "init off failed");
 
     s_inited = true;
     ESP_LOGI(TAG, "init done (led_indicator + led_strip, brightness=%d)",

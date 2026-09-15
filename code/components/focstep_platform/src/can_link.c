@@ -18,21 +18,18 @@ static const char *TAG = "CAN";
 #define CAN_MAGIC 0xA5
 
 static bool s_inited = false;
-static bool s_active = false;
+static bool s_active = false; /* TWAI 已 start (与收发器的醒睡无关, 见下) */
 static TickType_t s_last_rx = 0;
 static bool s_bus_off = false;
 static bool s_lost_reported = false;
 static uint32_t s_rx_count = 0;
 
-esp_err_t can_set_active(bool active)
-{
-    /* Rs 低 = 正常工作, Rs 高 = 睡眠 (10k 上拉决定上电默认睡眠) */
-    esp_err_t ret = gpio_set_level((gpio_num_t)PIN_CAN_RS, active ? 0 : 1);
-    if (ret == ESP_OK) {
-        s_active = active;
-    }
-    return ret;
-}
+/* ★ 这里**没有** can_set_active() —— Rs 接在 VREF 门控 NPN 的集电极上, **随 nSLEEP 硬件派生**:
+ *       nSLEEP(GPIO18) 高 → NPN 饱和 → 集电极 ≈0.1V → Rs 低 = CAN 唤醒
+ *       nSLEEP(GPIO18) 低 → NPN 截止 → 集电极 3.4V  → Rs 高 = CAN 睡眠
+ *   ⇒ CAN 的醒睡由 power_state.c 抬高/拉低 GPIO18 间接决定, **软件无法独立控制**,
+ *     上电默认 nSLEEP=低 ⇒ Rs 高 ⇒ CAN 睡眠 —— 由硬件保证, 不靠固件。
+ *   见 docs/doc.md §5.3 与 board_pins.h。 */
 
 esp_err_t can_init(void)
 {
@@ -40,16 +37,12 @@ esp_err_t can_init(void)
         return ESP_OK;
     }
 
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << PIN_CAN_RS,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "Rs gpio config failed");
-    /* 上电安全态: CAN 睡眠 (§10.3) */
-    ESP_RETURN_ON_ERROR(can_set_active(false), TAG, "Rs init failed");
+    /* ⚠️ 没有 Rs 的 GPIO 要配 (上电默认睡眠由硬件保证)。
+     *
+     * ⚠️⚠️ **TWAI 一旦 start 就占用 GPIO16/17, 会把 UART0 控制台顶掉** ——
+     *    这两个脚是共用的 (4P 调试排针 / CAN 收发器), 同一时刻只能有一个外设驱动。
+     *    ⇒ **本函数只能在"用 CAN 档"调用**: 该档的控制台走 USB-Serial-JTAG。
+     *    app_main.c 用 CONFIG_FOCSTEP_CAN_ENABLE 把这条开关钉在构建期。 */
 
     twai_general_config_t gcfg = TWAI_GENERAL_CONFIG_DEFAULT(
         (gpio_num_t)PIN_CAN_TXD, (gpio_num_t)PIN_CAN_RXD,
@@ -84,7 +77,7 @@ esp_err_t can_init(void)
     twai_filter_config_t fcfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     ESP_RETURN_ON_ERROR(twai_driver_install(&gcfg, &tcfg, &fcfg), TAG, "driver install failed");
-    /* 先不进 started, 由 can_set_active(true) 时再启 —— 深睡档不需要 CAN */
+    /* 先不进 started, 由 ensure_started() 在第一次 tick 再启 —— 深睡档不需要 CAN */
     s_last_rx = xTaskGetTickCount();
     s_inited = true;
     ESP_LOGI(TAG, "init done: bitrate=%d mode=%s", CONFIG_FOCSTEP_CAN_BITRATE,
@@ -100,10 +93,10 @@ esp_err_t can_init(void)
 static void ensure_started(void)
 {
     if (!s_active) {
-        can_set_active(true);
         if (twai_start() != ESP_OK) {
             ESP_LOGE(TAG, "twai_start failed");
         } else {
+            s_active = true;
             s_last_rx = xTaskGetTickCount();
         }
     }

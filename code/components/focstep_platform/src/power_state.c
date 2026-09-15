@@ -2,7 +2,6 @@
 #include "board_pins.h"
 #include "foc_motor.h"
 #include "bus_voltage.h"
-#include "can_link.h"
 #include "platform_events.h"
 
 #include <string.h>
@@ -31,9 +30,9 @@ static volatile bool s_nfault_flag = false;
 
 /* ------------------------------------------------------------------
  * nSLEEP: 本文件的唯一核心职责
- * ⚠️ 全工程**只有这里**可以写 GPIO16。理由见 power_state.h 顶部:
- *    SLEEP/FAULT 态若忘了拉低 nSLEEP, VREF 分压会持续耗 106µA (0.42mW@24V),
- *    是整机 0.25mW 待机预算的 1.7 倍。
+ * ⚠️ 全工程**只有这里**可以写 GPIO18。理由见 power_state.h 顶部:
+ *    SLEEP/FAULT 态若忘了拉低 nSLEEP, VREF 分压会持续耗 106µA@3.4V
+ *    (折算 24V 输入侧 ≈17.6µA ≈ 0.42mW), 占深睡档基线 (25~65µA@24V) 的 27~70%。
  * ------------------------------------------------------------------ */
 static void nsleep_set(bool enable_motor)
 {
@@ -82,11 +81,11 @@ static void enter_state(power_state_t st)
 
     switch (st) {
     case PS_SLEEP:
-        /* 顺序: 停运动 → 电机断电(nSLEEP 低, VREF 随之归零) → CAN 睡眠
-         *       → 编码器转低功耗档 → (轻睡档) 暂停 FOC 任务 */
+        /* 顺序: 停运动 → 电机断电 → 编码器转低功耗档 → (轻睡档) 暂停 FOC 任务
+         * ⚠️ `nsleep_set(false)` **一根脚同时办三件事** (见 power_state.h 文件头):
+         *    DRV 断电 + VREF 门控关断 + **CAN 的 Rs 转睡眠** —— 不需要额外调用。 */
         foc_motor_stop();
         nsleep_set(false);
-        can_set_active(false);
         foc_motor_encoder_set_mode(ENC_CMD_WAKEUP_SLEEP);
 #if CONFIG_FOCSTEP_SLEEP_MODE_LIGHT || CONFIG_FOCSTEP_PA_WAKE_ENABLE
         /* 需要"系统能真正 idle"的两档都要暂停 FOC 任务:
@@ -135,8 +134,8 @@ esp_err_t power_state_init(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "nSLEEP gpio config failed");
 
-    /* 上电安全态: 电机断电。板上 GPIO16 本来就有 10k 下拉, 这里再显式拉低,
-     * 保证 VREF 门控 P-MOS 关断。 */
+    /* 上电安全态: 电机断电。板上 GPIO18 本来就有 10k 下拉, 这里再显式拉低,
+     * 保证 VREF 门控 P-MOS 关断, 同时让 CAN 的 Rs 保持睡眠。 */
     nsleep_set(false);
 
     /* nFAULT: 低有效, 10k 上拉。任一下降沿立即断电。 */
@@ -155,11 +154,6 @@ esp_err_t power_state_init(void)
     s_inited = true;
     ESP_LOGI(TAG, "init done; nSLEEP=低 (电机断电, VREF 门控关断)");
     return ESP_OK;
-}
-
-void power_state_set_can_active(bool active)
-{
-    can_set_active(active);
 }
 
 void power_state_request(power_state_t want)

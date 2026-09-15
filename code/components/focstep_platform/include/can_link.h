@@ -3,16 +3,25 @@
 /*
  * CAN 总线 (TWAI)
  *
- * 硬件: GPIO18=TXD, GPIO20=RXD, GPIO19=Rs (10k 上拉, 上电默认 CAN 睡眠)
- *   Rs 高 = 只监听/睡眠, Rs 低 = 正常工作 —— 与 §10.3 状态表一致:
- *   深睡/唤醒接管 = Rs 高, 运行 = Rs 低。
+ * 硬件: **GPIO16 = TXD, GPIO17 = RXD** —— 与 **4P 调试排针共用同一对网络**
+ *   (docs/doc.md §5.3)。同一时刻只能有一个外设驱动它们 ⇒ **本模块只能在"用 CAN 档"
+ *   启用**, 该档的控制台走 USB-Serial-JTAG (GPIO12/13)。app_main.c 用
+ *   `CONFIG_FOCSTEP_CAN_ENABLE` 把这条开关钉在构建期。
+ *   ⚠️ U6 的 RXD 与 GPIO17 之间串有 **1.5kΩ** —— 那是为了让 USB-UART 适配器在
+ *      收发器在线时仍能拉低 GPIO17。**属硬件职责, 软件不用管**。
  *
- * ⚠️ docs/doc.md **全文未提及 CAN 波特率** —— 默认 500k 是本次新增的占位项,
- *    定稿前需确认 (见 code/driver/main/Kconfig.projbuild)。
- * ⚠️ 菊花链拓扑: 只在总线两端节点保留 120Ω 终端电阻, 中间节点拆除。
+ * ★ **Rs 没有 GPIO**: 它挂在 VREF 门控 NPN 的集电极上, **随 nSLEEP 硬件派生** ——
+ *     nSLEEP(GPIO18) 高 → Rs 低 = CAN 唤醒;  nSLEEP(GPIO18) 低 → Rs 高 = CAN 睡眠。
+ *   ⇒ 上电默认 nSLEEP=低 ⇒ **CAN 默认睡眠**(硬件保证); 且**软件无法独立控制 CAN 醒睡**。
+ *   ⇒ 本模块**没有** can_set_active() (原接口随 GPIO 取消而删除)。
  *
- * §10.4 安全逻辑④: CAN 丢帧/总线关闭 → 上报故障码 4, **不影响本地控制**
+ * ⚠️ docs/doc.md 尚未定 CAN 波特率 —— 默认 500k 是占位项, 见 §9.1 #3。
+ * ⚠️ 菊花链拓扑: 只在总线两端节点保留终端电阻, 中间节点拆除 (板载为分裂终端 2×60Ω)。
+ *
+ * §10.4 安全逻辑⑤: CAN 丢帧/总线关闭 → 上报故障码 4, **不影响本地控制**
  * (手拉助动仍然工作)。
+ * ⚠️ **用 4P 调试口时 CAN 总线必须拔掉** —— 此时总线上无其他节点, TWAI 必然报错,
+ *    那是**预期行为、不是故障**, 应关闭丢帧上报 (见 docs/doc.md §10.4 ⑤)。
  */
 
 #include <stdbool.h>
@@ -32,10 +41,8 @@ typedef enum {
     CAN_CMD_STOP,
 } can_cmd_t;
 
+/* 安装 TWAI 驱动。⚠️ **只能在"用 CAN 档"调用** —— 它会占用 GPIO16/17 顶掉 UART0 控制台。 */
 esp_err_t can_init(void);
-
-/* Rs 收发器使能: true = 正常工作 (Rs 低), false = 睡眠 (Rs 高) */
-esp_err_t can_set_active(bool active);
 
 /* 周期性调用 (建议 10~20ms): 收帧、超时检测。
  * 收到指令时**发 `FOCSTEP_EVT_CAN_CMD` 事件**, 不直接执行 —— 响应策略在应用层。

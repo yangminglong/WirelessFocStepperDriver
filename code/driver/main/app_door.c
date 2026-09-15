@@ -86,14 +86,14 @@ static void set_mode(app_mode_t m)
         led_set_color(LED_COLOR_OFF);        /* 深睡=灭 */
         break;
     case APP_MODE_ASSIST:
-        /* §10.3: 唤醒接管 = CAN 收发器睡眠 (Rs 高) */
-        power_state_set_can_active(false);
+        /* ★ CAN 的 Rs 由 nSLEEP 硬件派生 (docs/doc.md §5.3), 此处**无需也无法**控制。
+         *   接管态 nSLEEP 为高 ⇒ Rs 低 ⇒ CAN 实际在工作 —— 与原 §10.3 表
+         *   "接管 = CAN 睡眠" 不同。这是"Rs 零器件挂在 NPN 集电极"的已知取舍:
+         *   接管时电机在跑 (百 mA 级), CAN 的 mA 级电流是噪声, 可接受。 */
         led_set_color(LED_COLOR_VIOLET);     /* 唤醒接管=紫 */
         foc_motor_set_voltage_limit(s_assist_volts); /* 助动用小力矩，防冲击 */
         break;
     case APP_MODE_RUNNING:
-        /* §10.3: 运行 = CAN 工作 (Rs 低) */
-        power_state_set_can_active(true);
         led_set_color(LED_COLOR_GREEN);      /* 运行=绿 */
         /* 恢复运行力矩 (助动时被调小过) */
         foc_motor_set_voltage_limit(foc_motor_default_voltage_limit());

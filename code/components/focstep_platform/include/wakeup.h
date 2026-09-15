@@ -5,7 +5,7 @@
  *
  * 唤醒源 (docs/doc.md §六):
  *   - 编码器 KTH5701 INT → GPIO3 (LP 域) → **ext1**
- *   - CAN 收发器 RXD    → GPIO20 **(HP 域, 不支持 ext1)**
+ *   - CAN 收发器 RXD    → GPIO17 **(HP 域, 不支持 ext1)** ⇒ **CAN 不能作唤醒源**
  *   - 干接点            → 与编码器 INT 共线
  *
  * ★ 先澄清一个常见误解: **ESP32-C6 深睡期间 BLE/Wi-Fi 控制器无法保持接收**

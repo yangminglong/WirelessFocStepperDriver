@@ -97,7 +97,11 @@ esp_err_t bus_voltage_read_mv(int *mv)
         return ret;
     }
 
-    /* 源阻抗 7.6kΩ × 10nF ⇒ τ=76µs。等 2ms 远大于 5τ。 */
+    /* 源阻抗 7.6kΩ × 1nF ⇒ τ=7.6µs, 5τ≈38µs。等 2ms 远大于 5τ。
+     * ⚠️ **这 2ms 是分压支路的主要开销**: 导通期间 108.2k 持续吸 233µA@25.2V。
+     *    doc.md §六 按"只导通 5τ"算得 0.84µA@24V; 实际导通 2ms 是 **48µA@24V**。
+     *    要按 100Hz 跑 LP 核母线监测, 这里得换成 µs 级忙等 —— 1kHz tick 下
+     *    vTaskDelay 最小就是 1ms, 下不去 (CONFIG_FREERTOS_HZ=1000)。 */
     vTaskDelay(pdMS_TO_TICKS(CONFIG_FOCSTEP_VBUS_GATE_SETTLE_MS));
 
     int raw = 0;
