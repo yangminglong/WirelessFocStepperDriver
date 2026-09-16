@@ -3,6 +3,7 @@
 
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_rom_sys.h" /* esp_rom_delay_us: µs 级忙等, 见 bus_voltage_read_mv */
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
@@ -79,10 +80,10 @@ esp_err_t bus_voltage_init(void)
 #endif
 
     s_inited = true;
-    ESP_LOGI(TAG, "init done: divider=%d/%d, gate=%s, settle=%dms",
+    ESP_LOGI(TAG, "init done: divider=%d/%d, gate=%s, settle=%dus, min-enable=%dmV",
              CONFIG_FOCSTEP_VBUS_DIVIDER_NUM, CONFIG_FOCSTEP_VBUS_DIVIDER_DEN,
              CONFIG_FOCSTEP_VBUS_GATE_ACTIVE_HIGH ? "active-high" : "active-low",
-             CONFIG_FOCSTEP_VBUS_GATE_SETTLE_MS);
+             CONFIG_FOCSTEP_VBUS_GATE_SETTLE_US, CONFIG_FOCSTEP_VBUS_MIN_ENABLE_MV);
     return ESP_OK;
 }
 
@@ -97,12 +98,15 @@ esp_err_t bus_voltage_read_mv(int *mv)
         return ret;
     }
 
-    /* 源阻抗 7.6kΩ × 1nF ⇒ τ=7.6µs, 5τ≈38µs。等 2ms 远大于 5τ。
-     * ⚠️ **这 2ms 是分压支路的主要开销**: 导通期间 108.2k 持续吸 233µA@25.2V。
-     *    doc.md §六 按"只导通 5τ"算得 0.84µA@24V; 实际导通 2ms 是 **48µA@24V**。
-     *    要按 100Hz 跑 LP 核母线监测, 这里得换成 µs 级忙等 —— 1kHz tick 下
-     *    vTaskDelay 最小就是 1ms, 下不去 (CONFIG_FREERTOS_HZ=1000)。 */
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_FOCSTEP_VBUS_GATE_SETTLE_MS));
+    /* 源阻抗 = (100k∥8.2k) + 4.7k 串阻 = 12.3kΩ, ×1nF ⇒ τ=12.3µs, 5τ≈62µs;
+     * 另 Q2 栅极建立 ≈5µs ⇒ 取 CONFIG_FOCSTEP_VBUS_GATE_SETTLE_US (默认 70)。
+     *
+     * ⚠️ **导通时间直接决定待机开销, 必须走 µs 级忙等**:
+     *    导通期间 分压吸 VM/108.2k ≈ 233µA + 恒流下沉栅极支路 79µA = **312µA**。
+     *    @100Hz + 70µs ⇒ 平均 **2.2µA@25.2V**(doc.md §六 取 ≈2.1µA);
+     *    若导通 2ms ⇒ **62µA —— 差 28 倍**, 单这一项就吃掉整个深睡档预算。
+     *    ⇒ **不能用 vTaskDelay**: CONFIG_FREERTOS_HZ=1000 时最小就是 1ms, 下不去。 */
+    esp_rom_delay_us(CONFIG_FOCSTEP_VBUS_GATE_SETTLE_US);
 
     int raw = 0;
     ret = adc_oneshot_read(s_adc, ADC_CHANNEL_2, &raw);

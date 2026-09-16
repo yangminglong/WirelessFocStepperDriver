@@ -207,7 +207,8 @@ static int do_vbus(int argc, char **argv)
         printf("读母线失败: %s\n", esp_err_to_name(ret));
         return 1;
     }
-    printf("VBUS = %d mV  (门控导通 %dms 后采样)\n", mv, CONFIG_FOCSTEP_VBUS_GATE_SETTLE_MS);
+    printf("VBUS = %d mV  (门控导通 %dµs 后采样; 导通期耗 312µA)\n",
+           mv, CONFIG_FOCSTEP_VBUS_GATE_SETTLE_US);
     printf("使能下限 %d mV ⇒ %s\n", CONFIG_FOCSTEP_VBUS_MIN_ENABLE_MV,
            bus_voltage_allow_motor_enable(mv) ? "允许使能电机 ✅" : "禁止使能 ❌");
     printf("提示: 与万用表比对。门控关断时外部分压节点应为 0V, 若为 24V 说明\n"
