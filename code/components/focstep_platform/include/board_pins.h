@@ -93,7 +93,10 @@
  *   —— GPIO8=0 且 GPIO9=0 是非法组合, 会导致无法进入下载模式。
  *
  * ⚠️ JTAG: GPIO4~7 是 RISC-V JTAG 默认复用脚 (MTMS/MTDI/MTCK/MTDO),
- *    本设计用作 IPROPI-1/IPROPI-2/**WS2812 DIN**/分压门控 ⇒ **外部 JTAG 不可用**。
+ *    本设计分别用作 IPROPI-1、IPROPI-2、**WS2812 DIN**、分压门控 ⇒ **外部 JTAG 不可用**。
+ *    ⚠️ 本行原先写作 "IPROPI-2" 紧接斜杠再接 "**WS2812 DIN**" —— 斜杠与星号相邻
+ *       会构成 C 的嵌套注释起始符, 被 GCC 判为 -Wcomment 直接编译失败 (已修)。
+ *       **本文件内注意: 斜杠不要紧邻星号。**
  *    控制台另有两条通路: 4P 排针 (GPIO16/17, 默认) 与 USB-Serial-JTAG (GPIO12/13, 用 CAN 时)。
  */
 
