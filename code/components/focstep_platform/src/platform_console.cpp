@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <inttypes.h> /* PRIu32: 本工具链上 uint32_t == long unsigned int, %u 会 -Werror=format */
 
 #include "esp_log.h"
 #include "esp_check.h"
@@ -249,7 +250,7 @@ static int do_vref(int argc, char **argv)
     } else {
         printf("请量 **VREF 引脚** = 0V。\n");
         printf("这一态若不为 0, 说明 P-MOS 门控没关断 ⇒ 分压持续耗 106µA@3.4V\n"
-               "(折算 24V 输入侧 ≈17.6µA), 占深睡档基线 (25~65µA@24V) 的 27~70%。\n");
+               "(折算 24V 输入侧 ≈17.6µA), 占深睡档基线 (25~65µA@24V) 的 27~70%%。\n");
     }
     return 0;
 }
@@ -823,12 +824,13 @@ static void wl_print_status(void)
 
     printf("无线唤醒: 模式=%s 状态=%s\n",
            (st.mode == PA_WAKE_PA) ? "PA 监听" : "关闭", wl_state_str(&st));
-    printf("  SID=%u skip=%u per_adv_ival=%u ms | T 实得=%u ms 期望=%u ms\n",
+    printf("  SID=%u skip=%u per_adv_ival=%u ms | T 实得=%" PRIu32 " ms 期望=%" PRIu32 " ms\n",
            st.sid, st.skip, st.per_adv_ival_ms, st.t_ms, st.t_want_ms);
-    printf("  host=%s synced=%d rssi=%d | 失步=%u 收包=%u 指令=%u\n",
+    printf("  host=%s synced=%d rssi=%d | 失步=%" PRIu32 " 收包=%" PRIu32 " 指令=%" PRIu32 "\n",
            st.host_ready ? "就绪" : "未就绪", (int)st.synced, st.rssi,
            st.lost_cnt, st.pkt_ok, st.cmd_cnt);
-    printf("  丢弃: crc=%u 重复帧=%u 非本机=%u 版本不符=%u 噪声=%u\n",
+    printf("  丢弃: crc=%" PRIu32 " 重复帧=%" PRIu32 " 非本机=%" PRIu32
+           " 版本不符=%" PRIu32 " 噪声=%" PRIu32 "\n",
            st.drop_crc, st.drop_dup, st.drop_not_me, st.drop_badver, st.drop_noise);
     printf("  ⚠️ PA 是**单向**链路(发送端无回执) ⇒ 改 T 是否生效只能在**本端**看实得值\n");
 }

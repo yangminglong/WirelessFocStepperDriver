@@ -349,7 +349,7 @@ static homing_result_t learn_range_once(home_dir_t zero_dir)
     post_homed(r, a_zero);
     if (r == HOME_OK) {
         float span = 0.0f;
-        foc_motor_get_range(nullptr, nullptr, &span);
+        foc_motor_get_range(NULL, NULL, &span);
         ESP_LOGW(TAG, "=== 两端自学习完成: 零点 %.3f rad (朝%s) / 满行程点 %.3f rad (朝%s) "
                       "⇒ span %.3f rad (%s) ===",
                  (double)a_zero, homing_dir_str(zero_dir),

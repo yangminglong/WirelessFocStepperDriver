@@ -110,7 +110,7 @@ static int do_pa_send(int argc, char **argv)
         printf("未知命令: %s\n", argv[1]);
         return 1;
     }
-    uint32_t arg = (argc > 2) ? (uint32_t)strtoul(argv[2], nullptr, 10) : 0;
+    uint32_t arg = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 10) : 0;
 
     esp_err_t r = pa_wake_inject_cmd(cmd, arg);
     printf("本地注入 %s(arg=%u) → %s\n", foc_door_cmd_name(cmd), (unsigned)arg,

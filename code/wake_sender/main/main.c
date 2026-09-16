@@ -382,7 +382,7 @@ static int cmd_t(int argc, char **argv)
         return 0;
     }
     if (argc > 1) {
-        uint32_t ms = (uint32_t)strtoul(argv[1], nullptr, 10);
+        uint32_t ms = (uint32_t)strtoul(argv[1], NULL, 10);
         s_t_auto = false;
         policy_apply_t(ms, "手动");
         printf("T 策略 → 手动 (t auto 恢复自动)\n");

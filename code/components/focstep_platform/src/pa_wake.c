@@ -35,6 +35,15 @@ static const char *TAG = "PA";
 #include "host/ble_gap.h"
 #include "host/util/util.h"
 
+/* ⚠️ NimBLE **没有公开头文件声明** `ble_store_config_init()` —— 上游把它归为内部函数,
+ *    IDF 自己也是就地前置声明 (见 examples/bluetooth/nimble/bleprph/main/main.c:53
+ *    与 nimble/host/src/ble_hs_pvcy.c:336)。
+ *    定义在 nimble/host/store/config/src/ble_store_config.c, 由 bt 组件**无条件**编入
+ *    libbt.a (已 nm 核实) ⇒ 前置声明即可, 不必也不能靠 #include 拿到它。
+ *    作用: 把主机存储后端由默认 RAM store 换成 NVS 后端 (配对/CCCD/IRK 可持久化)。
+ *    幂等 + IDF 把 SYSINIT_ASSERT_ACTIVE() 定义为空, 重复调用安全。 */
+void ble_store_config_init(void);
+
 /* 与发送端约定的周期广播 SID (发送端侧 SID 宏见 wake_sender/main/main.c) */
 #define PA_SID 2
 
@@ -79,14 +88,14 @@ static uint32_t s_lost_cnt = 0;
 static uint32_t s_pkt_ok = 0;
 static uint32_t s_cmd_cnt = 0;
 static uint32_t s_filtered = 0; /* 被应用过滤钩子挡下的包 (典型: 心跳) */
-static pa_wake_payload_filter_t s_payload_filter = nullptr;
+static pa_wake_payload_filter_t s_payload_filter = NULL;
 /* 丢弃计数 (现场排障用: 分得清"没收到"是链路噪声、别人家的包、还是版本不符) */
 static uint32_t s_drop_crc = 0, s_drop_dup = 0, s_drop_not_me = 0;
 static uint32_t s_drop_badver = 0, s_drop_noise = 0;
 
 /* 扫描相位: 快扫(找得到对端就快) → 快扫超时后转慢扫(对端不在场时别烧电) */
 static bool s_slow_scan = false;
-static esp_timer_handle_t s_scan_phase_tmr = nullptr;
+static esp_timer_handle_t s_scan_phase_tmr = NULL;
 
 /* session/sequence 去重状态。放 RAM: 深睡复位后重来是可接受的
  * (最坏是执行一次重复指令, 而指令本身是幂等的开关停) */
@@ -467,7 +476,7 @@ esp_err_t pa_wake_init(uint32_t my_receiver_id)
     esp_err_t terr = esp_timer_create(&tmr, &s_scan_phase_tmr);
     if (terr != ESP_OK) {
         ESP_LOGW(TAG, "相位定时器创建失败: %s (快扫不会自动转慢扫)", esp_err_to_name(terr));
-        s_scan_phase_tmr = nullptr;
+        s_scan_phase_tmr = NULL;
     }
 
     nimble_port_freertos_init(host_task);
