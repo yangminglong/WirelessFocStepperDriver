@@ -17,8 +17,8 @@
  *   IPROPI(µA) = (I_LS1 + I_LS2) × A_IPROPI          §7.3.3.1 Eq.1
  *   - **只有低边 drain→source 方向的电流计入, 反方向计 0**
  *     ⇒ IPROPI 恒 ≥ 0, **无符号**。符号须由驱动方向重建 (本模块不做)。
- *   - V_IPROPI 被内部**钳位到 V_VREF** (本板 2.34V)
- *     ⇒ ADC 可测上限 ≈ 2.34 / (3.5k × 450µA/A) ≈ **1.49A**, 再高读数不再上升。
+ *   - V_IPROPI 被内部**钳位到 V_VREF** (1.5A 档 = 2.35V)
+ *     ⇒ ADC 可测上限 ≈ 2.35 / (3.48k × 450µA/A) ≈ **1.494A**, 再高读数不再上升。
  *       所以堵转只能判"到顶", 不能测幅值 —— 阈值必须 < ITRIP。
  *   - A_IPROPI: 手册正文 450、应用示例 455 µA/A **自相矛盾** ⇒ 靠 Kconfig 标定。
  *
@@ -69,7 +69,7 @@ esp_err_t ipropi_read_mv(int phase, int *mv);
  *   主循环里      float peak = ipropi_envelope_take();     // ~100ms, 读并清零
  *                 ipropi_stall_update(peak);
  *
- * ⚠️ 因为 VIPROPI 被钳位到 V_VREF, 电流幅值上限 ≈1.49A, 再高读数不再上升。
+ * ⚠️ 因为 VIPROPI 被钳位到 V_VREF, 电流幅值上限 ≈1.494A, 再高读数不再上升。
  *    所以阈值的语义是"电流已达上限且持续" —— 不是精确的力矩测量,
  *    且 stall_current_ma **必须 < ITRIP**。
  */
@@ -88,7 +88,7 @@ void ipropi_stall_config(float stall_current_ma, uint32_t stall_ms);
 /* 输入应为幅值 (通常来自 ipropi_envelope_take)。
  * 返回 true = **当前处于堵转锁存态** —— 一旦触发就保持, 直到
  * ipropi_stall_reset() 被显式调用。这样做是为了避免"保持力矩期间电流仍在 ⇒
- * 反复触发"的抖动 (初版就是这么写的)。 */
+ * 反复触发"的抖动。 */
 bool ipropi_stall_update(float peak_ma);
 
 /* 是否处于堵转锁存态 */

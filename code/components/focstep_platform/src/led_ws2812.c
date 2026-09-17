@@ -149,9 +149,8 @@ static blink_step_t const *s_blink_lists[] = {
 static led_indicator_handle_t s_led = NULL;
 static bool s_inited = false;
 
-/* ★ 原 led_power() / led_power_is_on() 已随供电门控一并移除 (docs/doc.md §五.2):
- *   WS2812B-2020-V6 静态电流 ≦1µA、3.4V 常供 ⇒ P-MOS 门控失去理由,
- *   那个 GPIO8 也还给了 nFAULT。详见 led_ws2812.h 头注释。 */
+/* 灯带 3.4V **常供、无供电门控** ⇒ 本模块不提供 led_power() / led_power_is_on():
+ *   开关灯只靠 led_set_color() 写颜色。理由见 led_ws2812.h 头注释。 */
 
 esp_err_t led_set_color(led_color_t color)
 {
@@ -163,10 +162,23 @@ esp_err_t led_set_color(led_color_t color)
         idx = LED_IDX_OFF;
     }
 
-    /* ★ "灭" 不再是断电, 而是**发一帧全黑**: s_st_off 先写 RGB=0 再置 OFF,
+    /* ★ "灭" 是**发一帧全黑**: s_st_off 先写 RGB=0 再置 OFF,
      *   灯珠据此锁存全黑, 之后 IC 回到静态 ≦1µA。
      *   ⚠️ **这是深睡不亮灯的唯一保障 —— 已无硬件兜底**, 见 led_ws2812.h 纪律 1。 */
     return led_indicator_start(s_led, idx);
+}
+
+esp_err_t led_off_and_wait(void)
+{
+    esp_err_t ret = led_set_color(LED_COLOR_OFF);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    /* 让出调度 ≥5 个 led_indicator 定时器周期 (周期 1ms) ⇒ Tmr Svc 必然执行
+     * s_st_off: 写 RGB=0, 并同步等到 led_strip_refresh() 的 RMT 发送完成
+     * (3 灯珠 × 24bit @800kHz ≈ 90µs)。睡眠路径上一次性的 5ms 可忽略。 */
+    vTaskDelay(pdMS_TO_TICKS(5));
+    return ESP_OK;
 }
 
 void led_show_fault_code(uint8_t code)
@@ -183,8 +195,8 @@ esp_err_t led_init(void)
         return ESP_OK;
     }
 
-    /* ★ 不再配置供电脚: 灯带 3.4V **常供**, DIN 交给下面 led_strip 的 RMT 通道。
-     *   (原 GPIO8 供电门控已移除 —— 该脚现为 nFAULT, 由 power_state.c 管。) */
+    /* ★ 不配置供电脚: 灯带 3.4V **常供、无门控**, DIN 交给下面 led_strip 的 RMT 通道。
+     *   GPIO8 是 nFAULT, 由 power_state.c 管。 */
 
     led_indicator_config_t cfg = {
         .blink_lists = s_blink_lists,
@@ -209,7 +221,7 @@ esp_err_t led_init(void)
     /* 亮度在颜色值之上再缩放一次, 双重限幅防"全白拉垮 Buck" */
     led_indicator_set_brightness(s_led, CONFIG_FOCSTEP_WS2812_BRIGHTNESS);
 
-    /* ★ 上电安全态 = 灭。门控移除后**不再有"上电即断电"的硬件保障** ⇒
+    /* ★ 上电安全态 = 灭。灯带**常供、无门控**, 没有任何"上电即断电"的硬件保障 ⇒
      *   必须显式发一帧全黑。(V6 有"上电零闪", 上电瞬间本来也不会闪。) */
     ESP_RETURN_ON_ERROR(led_indicator_start(s_led, LED_IDX_OFF), TAG, "init off failed");
 

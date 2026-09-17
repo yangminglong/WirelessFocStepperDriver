@@ -8,11 +8,11 @@
  * 实现: **官方 espressif/led_indicator** (闪灯模式引擎) + **espressif/led_strip**
  *       (RMT 驱动)。闪灯时序是 led_indicator 的本职, 不自造。
  *
- * ★ 供电门控为什么被移除 (docs/doc.md §五.2):
+ * ★ 为什么灯带**常供电、无门控** (docs/doc.md §五.2):
  *   WS2812B-2020-V6 的**静态电流 ≦1µA**、供电 3.3~5.3V、**上电零闪** ——
  *   三颗合计 3µA@3.4V (折算 24V 输入侧 ≈0.4µA), 对深睡档 (25~65µA) 可忽略
- *   ⇒ 原 P-MOS 门控 (GPIO8) 存在的理由消失, 顺带把那个脚还给了 nFAULT。
- *   另: 灯带 VDD 恒有电 ⇒ "DIN 被驱动为高 + VDD=0" 这个**倒灌前提不存在**。
+ *   ⇒ 无需门控开关, 也就不占 GPIO。
+ *   灯带 VDD 恒有电 ⇒ "DIN 被驱动为高 + VDD=0" 这个**倒灌前提不存在**。
  *
  * ⚠️ 三条硬纪律:
  *   1. **进睡前必须发一帧全黑、然后停止发送**。睡眠不亮灯**已无硬件兜底**,
@@ -40,13 +40,12 @@ extern "C" {
  *
  * ★ 平台层只提供**颜色**与**故障闪码**, 不规定"什么颜色代表什么状态" ——
  *   那是应用语义。应用自己把状态映射到颜色 (见 app_door.c)。
- *   (重构前这里叫 LED_IDX_WAKE_ASSIST / LED_IDX_RUNNING, 把门机的四态
- *    写进了驱动层。)
+ *   门机四态那类名字 (WAKE_ASSIST / RUNNING …) 属应用, 不进驱动层。
  *
  * 故障闪码占 6 个索引 (码值 1~6, 与 power_state.h 的 PS_FAULT_* 对应)。
  */
 typedef enum {
-    LED_IDX_OFF = 0,   /* 灭: 发一帧全黑, 灯珠锁存 (不再断电) */
+    LED_IDX_OFF = 0,   /* 灭: 发一帧全黑, 灯珠锁存 (常供电, 靠锁存维持) */
     LED_IDX_DIM,       /* 极暗常亮 —— 比灭更省事, 用于"待机但要看得到" */
     LED_IDX_VIOLET,    /* 紫 */
     LED_IDX_GREEN,     /* 绿 */
@@ -75,9 +74,16 @@ typedef enum {
 
 esp_err_t led_init(void);
 
-/* 设置灯色/模式。**LED_COLOR_OFF = 发一帧全黑** (灯珠锁存全黑、IC 回到 ≦1µA),
- * 不再是断电 —— 门控已移除, 见上方纪律 1。 */
+/* 设置灯色/模式。**LED_COLOR_OFF = 发一帧全黑** (灯珠锁存全黑、IC 回到 ≦1µA)。
+ * 灯带常供电, 靠锁存维持末态 —— 见上方纪律 1。 */
 esp_err_t led_set_color(led_color_t color);
+
+/* ⚠️ **进睡眠前必须用这个, 不能用 led_set_color(OFF)**。
+ * led_indicator_start() 只挂 blink_type + 启动 1ms 软件定时器, 真正"写一帧全黑"
+ * 发生在 Tmr Svc 任务里 —— 本函数在其后让出调度 (≥5 个定时器周期), 确保末态已锁存。
+ * 只调 led_set_color(OFF) 就往下走 ⇒ 灯珠停在上一颜色, 睡眠期间约 60mA (纪律 1 无硬件兜底)。
+ * 非睡眠路径用 led_set_color() 即可 (无需阻塞等待)。 */
+esp_err_t led_off_and_wait(void);
 
 /* 故障码闪灯 (docs/doc.md §10.4): 1=过流 2=过温 3=编码器失效 4=CAN掉线 5=nFAULT
  * 6=母线过低 7=行程标定缺失/失败

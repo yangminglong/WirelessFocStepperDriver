@@ -11,6 +11,8 @@ idf_component_register(
     SRCS
         # 传感器
         "src/kth5701.cpp"
+        # VREF DAC (MCP4725, doc.md §5.4)
+        "src/vref_dac.c"
         # 电流
         "src/ipropi_sense.c"
         "src/ipropi_current_sense.cpp"
@@ -51,6 +53,8 @@ idf_component_register(
         esp_pm              # pa_wake: 监听期开 PM 自动轻睡
         bt                  # pa_wake: NimBLE 主机与控制器 (FOCSTEP_PA_WAKE_ENABLE 时才引用)
         foc_link_protocol   # pa_wake: PA 载荷解析 (与发送端共用同一份线格式)
+        esp-idf-lib__i2cdev    # KTH5701 编码器 / MCP4725 DAC 共用 (新 i2c_master 驱动)
+        esp-idf-lib__mcp4725   # MCP4725 动态 VREF (vref_dac.c)
 )
 
 # 托管组件 (espressif/esp_simplefoc 等) 由应用层在 main/idf_component.yml 声明,

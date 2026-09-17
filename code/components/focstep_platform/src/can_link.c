@@ -24,9 +24,9 @@ static bool s_bus_off = false;
 static bool s_lost_reported = false;
 static uint32_t s_rx_count = 0;
 
-/* ★ 这里**没有** can_set_active() —— Rs 接在 VREF 门控 NPN 的集电极上, **随 nSLEEP 硬件派生**:
- *       nSLEEP(GPIO18) 高 → NPN 饱和 → 集电极 ≈0.1V → Rs 低 = CAN 唤醒
- *       nSLEEP(GPIO18) 低 → NPN 截止 → 集电极 3.4V  → Rs 高 = CAN 睡眠
+/* ★ 这里**没有** can_set_active() —— Rs 接在反相 N-MOS (Q3=DMN3150L) 的漏极上, **随 nSLEEP 硬件派生**:
+ *       nSLEEP(GPIO18) 高 → Q3 导通 → 漏极 ≈0V → Rs 低 = CAN 唤醒
+ *       nSLEEP(GPIO18) 低 → Q3 截止 → 漏极经 100k 上拉 = 3.4V → Rs 高 = CAN 睡眠
  *   ⇒ CAN 的醒睡由 power_state.c 抬高/拉低 GPIO18 间接决定, **软件无法独立控制**,
  *     上电默认 nSLEEP=低 ⇒ Rs 高 ⇒ CAN 睡眠 —— 由硬件保证, 不靠固件。
  *   见 docs/doc.md §5.3 与 board_pins.h。 */

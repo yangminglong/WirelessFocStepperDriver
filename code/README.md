@@ -1,7 +1,7 @@
 # FocStepper 固件
 
-> 版本 v0.1（2026-09-14）· 状态：**代码完成，板未回，未上板验证**
-> 设计依据：[`docs/doc.md`](../docs/doc.md)（**v0.7**）· 无线唤醒选型：[`docs/wireless_wakeup_options.md`](../docs/wireless_wakeup_options.md)
+> 状态：**代码完成，板未回，未上板验证**
+> 设计依据：[`docs/doc.md`](../docs/doc.md) · 无线唤醒选型：[`docs/wireless_wakeup_options.md`](../docs/wireless_wakeup_options.md)
 > ⚠️ `doc.md` 是**原理图与固件的共同真源**：文档改了必须同步固件（`board_pins.h` / Kconfig），反之亦然。
 
 两个 ESP-IDF 工程 + 一份共享协议。**验收标准是 `idf.py build` 通过**——
@@ -22,6 +22,10 @@ code/
 
 ## 1. 构建
 
+两个工程都是 **esp32c6**，验收标准是各自 `idf.py build` 通过。
+
+### Linux
+
 ```bash
 export IDF_PATH=/home/hanson/.espressif/v5.5.3/esp-idf
 export IDF_TOOLS_PATH=/home/hanson/.espressif/tools
@@ -39,9 +43,54 @@ done
 
 > ⚠️ `~/.espressif/tools/activate_idf_v5.5.3.sh` 把 `idf.py` 定义成 **shell alias**，
 > 非交互 shell（脚本/CI）里不生效，必须用上面的显式方式。
->
+
+### Windows（eim 装的 IDF，在 Git Bash 里）
+
+本机 IDF 5.5.5 在 `Q:\espressif\.espressif\v5.5.5\esp-idf`，工具链在 `C:\Espressif\tools`
+（真值见 `C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1`）：
+
+```bash
+export IDF_TOOLS_PATH='C:\Espressif\tools'
+export IDF_PATH='Q:\espressif\.espressif\v5.5.5\esp-idf'
+export IDF_PYTHON_ENV_PATH='C:\Espressif\tools\python\v5.5.5\venv'
+export ESP_ROM_ELF_DIR='C:/Espressif/tools/esp-rom-elfs/20241011/'
+export PATH="/c/Espressif/tools/ccache/4.12.1/ccache-4.12.1-windows-x86_64:\
+/c/Espressif/tools/cmake/3.30.2/bin:\
+/c/Espressif/tools/ninja/1.12.1:\
+/c/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20260121/riscv32-esp-elf/bin:\
+/c/Espressif/tools/python/v5.5.5/venv/Scripts:$PATH"
+
+idf.py() { MSYS_NO_PATHCONV=1 "$IDF_PYTHON_ENV_PATH/Scripts/python.exe" \
+           "$TEMP/idfpy_wrapper.py" "$@"; }
+```
+
+`idfpy_wrapper.py` 见下面第 3 条。三条**必须知道**的（都实际踩过）：
+
+| # | 坑 | 现象 | 做法 |
+| --- | --- | --- | --- |
+| 1 | `export.sh` 拒绝 MSYS | 直接 `ERROR: MSys/Mingw is not supported` | **别用它** —— `idf.py` 本质就是 venv 的 `python.exe` 跑 `esp-idf/tools/idf.py`，直接调即可 |
+| 2 | Git Bash 不认 `C:/...` 形式的 PATH 项 | `which` 静默跳过它们，落到系统 PATH 里的别的版本（如 `P:\CMake 3.31.12` 顶掉 Espressif 的 3.30.2） | PATH 写 **POSIX 形式 `/c/...`**；`IDF_PATH` / `IDF_TOOLS_PATH` 这类给 Windows python 读的变量保持 Windows 形式 |
+| 3 | `MSYSTEM` 摘不掉 | `idf.py` 只打一句 "or continue at your own risk" 就退出 0，**什么都没编** | 用包装层：在自己进程里 `os.environ.pop('MSYSTEM', None)` 再拉起 `idf.py` |
+
+第 3 条的原因在 `idf.py` 的 `__main__`：
+
+```python
+if 'MSYSTEM' in os.environ:
+    print_warning('MSys/Mingw is no longer supported. ... or continue at your own risk.')
+elif ...
+else:
+    main()          # ← MSYSTEM 存在时永远走不到这里
+```
+
+那句 "or continue at your own risk" 是**假的** —— 它并不 continue。而 MSYS2 运行时会**强制**
+把 `MSYSTEM` 注入给每个原生 Windows 子进程，所以 `unset MSYSTEM` / `env -u MSYSTEM`
+都无效（已验证），只能靠包装层。`%TEMP%\idfpy_wrapper.py` 内容就是那三行。
+
 > ⚠️ **改完 `sdkconfig.defaults` 必须 `rm -f sdkconfig`** —— 否则新条目与新增
 > Kconfig 符号都不会生效（后者直接编译报未声明）。本项目踩过两次。
+>
+> ⚠️ `sdkconfig` **不入库**（见 `.gitignore`），所以删它只会丢掉本机的 menuconfig 改动。
+> 只想验证编译、没动过 `sdkconfig.defaults` 时，**不必删**。
 
 ---
 
@@ -50,15 +99,15 @@ done
 **平台层 `components/focstep_platform/` 不含任何应用语义**，换项目整个目录拷走即可。
 
 | | 内容 | 行数 |
-|---|---|---|
+| --- | --- | --- |
 | **平台层** | `board_pins` / `kth5701` / `ipropi_*` / `bus_voltage` / `foc_motor` / `homing` / `power_state` / `wakeup` / `led_ws2812` / `platform_button` / `can_link` / `net_ota` / `platform_events` / `platform_console` | 4848 |
 | **应用层** | `app_main.c` / `app_door.c` / `app_console.c` | 614 |
 
-三条边界纪律（重构时立，已校验）：
+三条边界纪律（已校验）：
 
 1. **平台层不引用应用级 Kconfig**（`ASSIST_TORQUE` / `IDLE_TO_SLEEP_MS` / … 都在 `driver/main/Kconfig.projbuild`）
-2. **底层模块只发事件，不做决策**。按键、堵转、CAN 指令、nFAULT 都发 `FOCSTEP_EVT_*`，应用订阅后决定怎么做 —— 消除层次倒置（原来"按键"模块直接调 `power_state_*()`）
-3. **平台内部模块直接互相调用**，不再绕道函数指针钩子表（那张 `power_state_hooks_t` 单订阅、字段定形，换个应用就得改结构体）
+2. **底层模块只发事件，不做决策**。按键、堵转、CAN 指令、nFAULT 都发 `FOCSTEP_EVT_*`，应用订阅后决定怎么做 —— 按键模块不得直接调 `power_state_*()`，那是层次倒置
+3. **平台内部模块直接互相调用**，不设函数指针钩子表（`power_state_hooks_t` 那类表单订阅、字段定形，换个应用就得改结构体）
 
 应用层怎么接：
 
@@ -87,11 +136,11 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 已核实的仓库现状（2026-09-14）：
 
 | 功能 | 组件 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | FOC 电机控制 | **`espressif/esp_simplefoc` 1.4.1** | 传递拉入 `arduino-foc`(SimpleFOC v2.4.0 移植) + `iqmath` + `i2c_bus` |
 | I2C 总线 | **`espressif/i2c_bus` 1.5.2** | 由 esp_simplefoc 传递依赖，KTH5701 复用 |
 | WS2812 底层 | **`espressif/led_strip` 3.0.3** | RMT 驱动 |
-| **灯效/闪灯模式** | **`espressif/led_indicator` 2.1.2** | 闪灯时序与模式表是它的本职 —— 原本自己写的闪灯状态机已删除 |
+| **灯效/闪灯模式** | **`espressif/led_indicator` 2.1.2** | 闪灯时序与模式表是它的本职 —— 不必自己写闪灯状态机 |
 | **按键消抖/事件** | **`espressif/button` 4.2.1** | 短按/双击/长按识别。GPIO9 **严禁加消抖电容**，所以消抖只能做在固件里，正是它的用途 |
 | **局域网发现** | **`espressif/mdns` 1.12.0** | OTA 页面走 `focstep-xxxx.local` |
 | OTA 写入 | IDF 内置 `esp_ota_ops` / `esp_http_server` | 上传页 `ota_page.html` 随固件 EMBED 进去 |
@@ -100,10 +149,10 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 **确认没有官方组件、必须自研的**（已查组件仓库）：
 
 | 功能 | 结论 |
-|---|---|
+| --- | --- |
 | **KTH5701 驱动** | 仓库无此组件 ⇒ 自研 `kth5701.cpp`（见 §10）。另有一个 GPL-2.0 的 Linux 驱动可参考协议，**不取代码** |
 | **DRV8874 驱动** | 无官方组件。但本设计不需要 —— `StepperDriver2PWM` 直接产生 PH/EN 波形 |
-| 电流采样 | `LowsideCurrentSense` 在本拓扑不可用（它绑定 MCPWM 定时器，步进驱动走 LEDC）⇒ 自研 `ipropi_sense.c` + `IpropiCurrentSense`（见 §8）。**注意 `CurrentSense` 本身是抽象接口，可以自己写子类 —— 这曾导致一个错误结论** |
+| 电流采样 | `LowsideCurrentSense` 在本拓扑不可用（它绑定 MCPWM 定时器，步进驱动走 LEDC）⇒ 自研 `ipropi_sense.c` + `IpropiCurrentSense`（见 §8）。**注意 `CurrentSense` 本身是抽象接口，可以自己写子类** |
 | 电源状态机 | 应用专属，无组件可代 |
 
 > 顺带核实过：`espp/*`（magnetic_encoder / bldc_motor / twai / pid）是**第三方**组件（espp 组织），
@@ -119,7 +168,7 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 关键约束（详见该头文件注释）：
 
 | 项 | 要点 |
-|---|---|
+| --- | --- |
 | LP 域 GPIO0~7 | **已用满，无空闲 GPIO**。新增功能只能复用既有信号 |
 | ADC1 | GPIO0~6 七路，扣掉晶振后实际 5 路，本项目用满 3 路（GPIO2 母线 + GPIO4/5 IPROPI） |
 | Strapping | GPIO8 **严禁加下拉**（与 GPIO9 同为 0 是非法 boot 组合） |
@@ -130,9 +179,9 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 ## 5. ★ 上板前必须知道的裁决点
 
 §5.2 / §5.3 两处是**文档与手册/源码存在冲突**，代码里做成了可配置项，**必须上板用自检命令裁决**，
-不能假定哪一方对；§5.1 已随 `doc.md` v0.7 定稿，自检项保留用于**验打样是否接对**：
+不能假定哪一方对；§5.1 已定稿，自检项保留用于**验打样是否接对**：
 
-### 5.1 EN/PH 引脚（v0.7 已定稿，自检用于验线）
+### 5.1 EN/PH 引脚（自检用于验线）
 
 - 手册引脚命名是 **EN/IN1** 和 **PH/IN2**（**EN 在 IN1 上、PH 在 IN2 上**）
 - `doc.md` 已按此定线：**GPIO19/21 → IN1(EN)**、**GPIO20/22 → IN2(PH)**
@@ -163,7 +212,7 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 这两个脚、把 UART0 顶掉** ⇒ 只能做成 Kconfig 档位（`FOCSTEP_CAN_ENABLE`，**默认 `n`**）：
 
 | 档 | `FOCSTEP_CAN_ENABLE` | 控制台 sdkconfig | 4P 排针 | CAN |
-| ---- | ---- | ---- | ---- | ---- |
+| --- | --- | --- | --- | --- |
 | **调试档（默认）** | `n` | `CONFIG_ESP_CONSOLE_UART_DEFAULT=y`（不动） | ✅ 可用 | ❌ |
 | **CAN 档** | `y` | 改 `ESP_CONSOLE_USB_SERIAL_JTAG=y` + `USJ_ENABLE_USB_SERIAL_JTAG=y` + `USJ_NO_AUTO_LS_ON_CONNECTION=y` | ❌ | ✅ |
 
@@ -185,7 +234,7 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 按顺序敲（命令台 `focstep>`，输入 `help` 可看全部）：
 
 | # | 命令 | 验什么 | 不过怎么办 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | `id` | 芯片 ID `0x0D == 0x0203` | **不通过就别往下走**，查 I2C 地址/上拉/供电 |
 | 2 | `regs` | 覆写并回读 0x1C/0x1D/0x1E | 见 §5.2 |
 | 3 | `circle 200` | 手转一圈，看 **XY 是否走出一个圆** | 圆度 < 1.10 合格 |
@@ -193,12 +242,12 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 | 5 | `vbus` | 母线电压，与万用表比对 | 差得多就查分压比/门控 |
 | 6 | `gate 0` | 门控关断后 ADC 节点应为 **0V** | 若为 24V ⇒ 门控做在低边了 |
 | 7 | `brake` | **两相 EN 拉低 = Brake**，手转有阻尼、电机不主动转 | 见 §5.1 |
-| 8 | `vref 0` / `vref 1` | **VREF 引脚 0V / ≈2.34V** | 不归 0 ⇒ P-MOS 没关断，**待机预算当场破** |
+| 8 | `vref 1.5` / `vref 0` | **VREF 引脚 ≈2.35V / 0V（0 档并进 PD）** | 0V 后总电流不回落 ⇒ DAC PD 没生效，**待机预算当场破** |
 | 9 | `jog 1.0` | 小电压点动，确认转向与 atan2 方向一致 | 反了就改 `FOCSTEP_ENCODER_DIRECTION` |
 | 10 | `align` | initFOC 电角对齐（**门要松开**） | — |
 | 11 | `char 2.0` | 实测相电阻 → **回填 Kconfig `FOCSTEP_PHASE_RESISTANCE`** | — |
 | 12 | `ipropi` | 两相电流，与万用表比对 → 标定 `A_IPROPI` | 手册正文 450 / 示例 455 自相矛盾 |
-| 12b | `stall` | 堵转判定状态；跑 normal 负载记稳态**矢量幅值**峰值，取其 1.5~2× 回填 `FOCSTEP_STALL_CURRENT_MA` | 阈值必须 < ITRIP(≈1.49A) |
+| 12b | `stall` | 堵转判定状态；跑 normal 负载记稳态**矢量幅值**峰值，取其 1.5~2× 回填 `FOCSTEP_STALL_CURRENT_MA` | 阈值必须 < ITRIP(≈1.494A) |
 | 12c | `learn both [pos]` | **标定行程**：顶两端机械限位，建立**零点(0%)**与**满行程点(100%)**并存 NVS。只给**零点的方向**（`learn both pos` = 零点在正端/反装机构），满行程点必然是反向。⚠️ 回零力矩默认仅 800mV，先确认机构上没人 | 报 `UNREPEATABLE` ⇒ 调小力矩/查机构；报 `RANGE` ⇒ 复核方向与机构 |
 | 12c' | `home pos\|neg` → `learn zero\|end` | **单端重标**两步走：先顶限位**测**接触点（不动行程），确认日志里的接触点与移动量合理，再**落定**（不动电机）。拆两步是为了拦住"撞到异物被误判成接触点"直接写进标定 | `learn zero\|end` 报"还没有测到的接触点" ⇒ 先跑 `home` |
 | 12d | `pos` | 行程**三态**（未标定 / 只有零点 / 零点+满行程点）+ 位置可信度。标定完应显示「零点+满行程点 + 可信 ✅」 | 未标定或不可信 ⇒ 先 `learn`/`mark` |
@@ -206,13 +255,13 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 | 12f | `goto 0.35` / `goto_x -0.05` / `goto_rad 3.14` | `goto` = 归一化开度（**夹在 0..1**，走完整门禁）；`goto_x` = 允许**越界**（越过零点/超出满行程）；`goto_rad` = 绝对角（不过门禁，自检用） | 报 `INVALID_STATE` ⇒ 位置不可信或行程不完整 |
 | 12g | `dir` / `dir invert` | 开度方向：`dir invert` **交换零点与满行程点**（= 正方向取反，纯数据变换） | 「开/关」与门的开合相反时用它；**不要**去改编码器方向（那会按指纹作废行程） |
 | 13 | `int` | **INT 锁存语义：读数据是否清中断** | ❌ 则深睡档不成立，须改轮询 |
-| 14 | `sleep` | 进深睡，量总电流 | 对比 `vref 1` 态，差值应 ≈**106µA** |
+| 14 | `sleep` | 进深睡，量总电流 | 睡眠态应已发 DAC PD（VREF=0）：量 VREF=0 且总电流落入深睡档基线（≈25~65µA@24V） |
 | 15 | `ota` | 打印运行/待升级分区与版本 | — |
 | 16 | `net on` | 起 Wi-Fi+HTTP+mDNS，浏览器开 `http://focstep-xxxx.local/` **实测升级一次** | 装门前必须验通 |
 | 17 | `sleep`（**轻睡档**，Kconfig 选 `FOCSTEP_SLEEP_MODE_LIGHT`） | 整机电流、唤醒延迟、**有没有 1 秒内反复唤醒** | 反复唤醒 ⇒ INT 锁存没清干净（见 §12） |
 | 18 | `wl` / `wl pa` / `pa_send` | 无线唤醒：PA 同步、`T` 实得值、`pa_send` 验指令链、接收端电流 | 见 **§13.6** 的 10 项 |
 
-> 第 13 项决定 §10.3 深睡档能否成立；第 8/14 项决定**深睡档待机预算（`doc.md` §六：25~65µA @24V）**是否守得住。
+> 第 13 项决定 §10.3 深睡档能否成立；第 8/14 项决定**深睡档待机预算（`doc.md` §六：25~65µA @24V）**是否守得住（VREF 走 MCP4725 PD，等效 ≈0）。
 > 这两条是**整个低功耗方案的地基**。
 >
 > 第 16 项不是"锦上添花" —— 板子装进门里之后再拆成本极高，**OTA 通路必须先验通**。
@@ -222,32 +271,31 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 
 ---
 
-## 7. 已回改进 doc.md 的设计偏差（v0.7 同步，保留备查）
+## 7. 关键选型依据（改动前先读这里）
 
-> 下表五项**均已落地到 `doc.md` v0.7**（§10.1 驱动架构与电流环、§五.4 + §六 的 VREF 门控与待机表、§四 引脚表）。
-> 本表保留为**依据备查**——它是"为什么不用旧口径"的唯一记录，**改动前先读这里**。
+> 下面每条都已是 `doc.md` 的现行口径（§四 引脚表、§10.1 驱动架构与电流环、
+> §五.4 + §六 的 VREF 方案与待机表）。**改动前先读这一节。**
 
-| 位置 | 旧文档（≤ v0.6） | 代码实际 / 现行文档（v0.7） | 依据 |
-|---|---|---|---|
-| `doc.md` §四、§10.1 | PWM 用 **MCPWM** ×4 | **LEDC ×2 + 2 路方向电平** | `esp_hal_stepper.cpp` 用 LEDC（20kHz/9-bit/LEDC_TIMER_0）；LEDC 走 GPIO 矩阵，任意脚可用 |
-| `doc.md` §10.1 | `StepperDriver4PWM` + **PMODE=高** | **`StepperDriver2PWM` + PMODE=低（PH/EN）** | 手册真值表：PWM 模式 `(0,0)=Coast`，PH/EN 模式 `EN=0=Brake`。手册明确 *"In coast mode… cannot be sensed"* ⇒ 4PWM 会让 IPROPI 只在导通期有效 |
-| `doc.md` §五.4 | VREF = 10k+22k 分压（**无门控**） | **加 nSLEEP 门控**（P-MOS+NPN，v0.7 已写入文档与 BOM） | 原方案常态耗 106µA @3.4V（折算 24V 输入侧 ≈17.6µA）——**当时**占 0.25mW 预算的 1.7 倍；按现基线 25~65µA 也占 **27~70%**。⇒ **这笔门控不依赖基线取值，独立成立** |
-| `doc.md` §六 待机表 | 三项相加 = 0.25mW（**漏 VREF 分压**） | **补「VREF 分压（随 nSLEEP 门控）≈0」一行** | 同上；两项门控任一不做，待机指标即破 |
-| `doc.md` §10.1 | 电流环走 IPROPI（未评估可行性） | **可行，已实现**（`FOCSTEP_TC_FOC_CURRENT`），符号需重建、过零点有死区（v0.7 已注明） | 见 §8 |
+| 位置 | 设计选择 | 依据 |
+| --- | --- | --- |
+| `doc.md` §四、§10.1 | **LEDC ×2 + 2 路方向电平** | `esp_hal_stepper.cpp` 用 LEDC（20kHz/9-bit/LEDC_TIMER_0）；LEDC 走 GPIO 矩阵，任意脚可用 |
+| `doc.md` §10.1 | **`StepperDriver2PWM` + PMODE=低（PH/EN）** | 手册真值表：PWM 模式 `(0,0)=Coast`，PH/EN 模式 `EN=0=Brake`。手册明确 *"In coast mode… cannot be sensed"* ⇒ 4PWM 会让 IPROPI 只在导通期有效 |
+| `doc.md` §五.4 | **MCP4725 动态 VREF**：12-bit DAC 直驱（I2C 0x60），ITRIP 档位表 0.3~1.8A，待机进 PD（VREF=0，60nA typ / 2µA max） | 固定分压两宗罪：① 无法运行时按档降 ITRIP（低电流档分辨率全靠降 VREF）；② 待机无断耗通路（210µA vs PD 60nA） |
+| `doc.md` §六 待机表 | 有「**MCP4725 PD ≈ 0**」一行（60nA，等效 ≈0） | 睡眠态漏发 DAC PD = 210µA 常挂 3.4V 轨，待机预算当场破 |
+| `doc.md` §10.1 | 电流环走 IPROPI，**`FOCSTEP_TC_FOC_CURRENT`** | 可行，符号需重建、过零点有死区 —— 见 §8 |
 
 ---
 
-## 8. 电流环：`foc_current` 是**可以做的**（已修正）
+## 8. 电流环：`foc_current` 是**可以做的**
 
-> ⚠️ **本节曾给出错误结论**，说 foc_current"结构性做不到"。**那是错的。**
-> 错因：把 `LowsideCurrentSense` —— 一个绑定 MCPWM 定时器 + 三电阻采样的**具体实现**
-> —— 当成了拿到 `CurrentSense` 的唯一途径。实际上 `CurrentSense` 是**抽象接口，
+> ⚠️ **别被 `LowsideCurrentSense` 误导。** 它是一个绑定 MCPWM 定时器 + 三电阻采样的
+> **具体实现**，不是拿到 `CurrentSense` 的唯一途径。`CurrentSense` 是**抽象接口，
 > 只有两个纯虚**（`init` / `getPhaseCurrents`），和 `Sensor` 一样可以自己写子类。
 
 ### 事实（已逐条核对源码）
 
 | 断言 | 核对结果 |
-|---|---|
+| --- | --- |
 | 基类是否为步进内建了分支？ | ✅ `CurrentSense::getABCurrents()`：*"if so there is no need to Clarke transform"*，两相直接 `alpha=a, beta=b` |
 | `driver_type` 怎么来的？ | ✅ `StepperDriver::type()` 返回 `DriverType::Stepper`，`linkDriver()` 自动取 |
 | Park 变换通用吗？ | ✅ `getDQCurrents()` 与驱动类型无关 |
@@ -273,17 +321,17 @@ source to drain, the value of ILSx for that channel is **zero**"*
 **由此而来的本质缺陷：**
 
 | # | 限制 | 影响 |
-|---|---|---|
+| --- | --- | --- |
 | 1 | **过零点附近符号无意义** | 这是最本质的缺陷。因 \|I\|→0 也随之减小，误差有界，但零附近环不干净 |
 | 2 | 符号有 **1 个 FOC 周期滞后**（1kHz 下 1ms） | 门机这种慢负载可忽略 |
 | 3 | 两相**非同时采样**（两次 oneshot 相隔 ~40µs） | 4% 相位偏差 |
 | 4 | `AERR` **±6%**（1–2A 档）；<0.4A 是 ±30mA 固定偏置 | 传感器偏粗，环的精度天花板 |
-| 5 | 超过 ITRIP 读数**被钳位**（≈1.49A） | 环无法要求更高电流（但 DRV8874 自己会斩波） |
+| 5 | 超过 ITRIP 读数**被钳位**（≈1.494A） | 环无法要求更高电流（但 DRV8874 自己会斩波） |
 
 ### 三档力矩环，按需选
 
 | Kconfig | 前提 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | `FOCSTEP_TC_VOLTAGE` | 无 | 最简，开环力矩。**首次上板建议先用它**跑通 FOC 与限位 |
 | `FOCSTEP_TC_ESTIMATED`（默认） | 实测相电阻 | `Uq = i_q·R + 反电动势`。拿电流环大部分收益，零额外硬件 |
 | `FOCSTEP_TC_FOC_CURRENT` | 实测相电阻 + 整定 PID | 双 PI 实测闭环。**实验性**，先读上面的缺陷表 |
@@ -309,7 +357,7 @@ source to drain, the value of ILSx for that channel is **zero**"*
 ```
 
 - **判据①必须用相对基线**。用绝对阈值会踩坑：回零力矩下自由运行的电流本就接近
-  `ITRIP`，绝对阈值在接触前就已满足 ⇒ 判据形同虚设。（初版就是这么写的）
+  `ITRIP`，绝对阈值在接触前就已满足 ⇒ 判据形同虚设。
 - **不能用"位置误差大"**：目标故意设在行程外，误差从一开始就是大的。正确表述是
   **"还在下指令，但实际位置不动了"**。
 - 两者都是**比值/差分判据**，免疫 A_IPROPI 容差、温度、轨压漂移。
@@ -326,7 +374,7 @@ StallGuard4 测的是**负载角**（线圈磁场与转子磁场的夹角）：�
 DIAG 拉高。**本质是反电动势测量。**
 
 | 维度 | TMC2209 StallGuard4 | 本方案 |
-|---|---|---|
+| --- | --- | --- |
 | 物理量 | 负载角（反电动势） | 电流相对基线的抬升 + 位置停滞 |
 | 输出 | 连续量 `SG_RESULT` (0–510)，可感知负载**连续变化** | 二值 |
 | **最低速度** | **须明显高于 ~1 rev/s**。低速下反电动势太小，测量不稳，"机械负载几乎不影响结果" | **无限制**，可以极慢 |
@@ -340,8 +388,8 @@ DIAG 拉高。**本质是反电动势测量。**
 - **回零这个用途上本方案不差，两项更好**：① **速度不受限** —— 这是决定性的，
   回零本就该慢，而 StallGuard 恰好要求快，快撞限位是要出事的；
   ② **有绝对位置**，判定不依赖任何模拟量的绝对精度。
-- **一项原本更差、现已对齐**：StallGuard 能在负载刚开始增大时就停；本方案原来靠
-  "位置停住"判定，机构已被顶住。改用**相对基线的电流抬升**后，响应时机基本对齐。
+- **响应时机已对齐**：StallGuard 能在负载刚开始增大时就停；本方案的**相对基线电流抬升**
+  判据在接触瞬间即响应，不必等"位置停住"（那时机构已被顶住）。
 - **仍不如的一项**：StallGuard 给的是**连续负载量**，能用于 CoolStep 那种连续力矩
   调节；本方案只给二值"到/没到"。对本应用（回零）无影响。
 
@@ -368,12 +416,12 @@ DIAG 拉高。**本质是反电动势测量。**
 - 两个端点各存一个**绝对多圈角**（rad），`span = 满行程点 − 零点` **带符号**
   ⇒ "正方向"就是 span 的符号，**反装机构**（零点的角比满行程点更大）天然表达得出来
 - 三态：`未标定` / `只有零点` / `零点+满行程点`。「全开/全关」**只在第三态成立**，
-  缺一个就直接拒绝开度指令（早期版本会退回 Kconfig 占位角，那样等于用错误基准冲限位，已删除）
+  缺一个就直接拒绝开度指令（不设占位角兜底 —— 占位角与真实机构无关，照它跑就是用错误基准冲限位）
 
 ### 标定行程的入口
 
 | 命令 | 做什么 | 什么时候用 |
-|---|---|---|
+| --- | --- | --- |
 | `learn both [pos\|neg]` | 顶限位标两端，带**两次逼近 + 重复性检查**。只给零点方向 | 首次装机 / 换电机 / 换机构 |
 | `home <方向>` → `learn zero` / `learn end` | 单端重标两步：`home` 只**测**（不动行程），`learn zero\|end` 只**写**（不动电机），**另一端的物理位置保持不变**（span 按新端点重算） | 只有一端够得着 / 只有一端动过 |
 | `mark zero` / `mark end` | **把当前位置定为端点**，不推限位（要求电机静止）| 手推到机械端点后免拆卸重标；或限位够不着时 |
@@ -388,8 +436,8 @@ DIAG 拉高。**本质是反电动势测量。**
 
 所以只有 2 种安装形态，不是 4 种：`learn both` 默认零点在负端，反装机构用 `learn both pos`
 （零点在正端）—— 满行程点的方向**必然是零点的反向**（两端都是顶出来的机械限位，而推拉机构
-只有两个），不需要也不应该手给。早期实现把两者绑死（"全关端"必朝负、"全开端"必朝正），
-反装机构根本表达不出来 ⇒ `learn closed|open` 写法已废弃。
+只有两个），不需要也不应该手给。把两者绑死（"全关端"必朝负、"全开端"必朝正）会让
+反装机构根本表达不出来 ⇒ 不设 `learn closed|open` 写法。
 
 **单端重标为什么拆成两步**：`home`（只测，不动行程）+ `learn zero|end`（只写，不动电机）。
 一次到底时，门中途撞到异物被接触判据误判出来的**假端点会直接写进标定**；拆开后操作员先看到
@@ -416,8 +464,8 @@ DIAG 拉高。**本质是反电动势测量。**
    **自动作废行程 + 标记位置不可信**（必须重标）—— 而不是静默沿用：
    后者会"能跑但整段错位"，现场基本发现不了。
 2. **从未标定时拒绝一切开度指令**（`move_to()` / 应用的开-关都会被拦）。
-   行程只有**标定**一个来源 —— 早期版本会退到 Kconfig 的 `ENCODER_MIN/MAX_ANGLE`
-   占位角，那两个配置项**已删除**：占位角与真实机构无关，照它跑就是用错误基准冲限位。
+   行程只有**标定**一个来源 —— 不设 `ENCODER_MIN/MAX_ANGLE` 一类占位角配置项：
+   占位角与真实机构无关，照它跑就是用错误基准冲限位。
 
 > 「行程是否已建立」的判据是 **NVS 里的持久化行程**，不是"本次开机跑过 learn 没有"
 > —— 复位后会正确显示三态。两个端点的**绝对角也一起持久化**，复位后 `pos` 直接看得到。
@@ -469,17 +517,21 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 
 ---
 
-## 11. 已知未完成项
+## 11. 未完成项 / 风险
 
 | 项 | 说明 |
-|---|---|
-| ~~OTA 未接~~ | ✅ 已接入：`net_ota.c` + `ota_page.html`（官方 `esp_ota_ops`/`esp_http_server`）。⚠️ **上板第一件事就是验它** —— 装进门里再拆成本极高 |
+| --- | --- |
 | **EAD 未做** | PA 载荷未加密。`receiver_id/session/sequence` 只能防误触发，不能防伪造。量产前必须补 |
-| ~~Wi-Fi 控制面未接~~ | ✅ 已接入：`net_ota.c`（官方 `esp_wifi`/`mdns`）。**默认关闭**（`FOCSTEP_WIFI_ENABLE=n`），因为开着会打破深睡；用 `net on` / `net off` 临时启用 |
-| ~~无线唤醒接收未接~~ | ✅ 已接入：平台层 `pa_wake.c`（PA 扫描/同步/载荷解析/周期调整）+ 应用侧监听窗口。出厂默认"上电即监听 + 超时回落"，详见 **§13**。⚠️ **尚未上板验证** |
-| ~~多圈限位自学习未做~~ | ✅ 已实现：`homing.c` + `home`/`learn`/`mark`/`dir`/`pos` 命令，行程是**零点 + 满行程点**两个语义端点（见 §9）。⚠️ 回零力矩、重复性容差、可信度容差**都必须上板实测整定** |
 | **上电自动标定的触发未接** | 策略与入口已有（`homing_auto()` + `FOCSTEP_HOME_AUTO_ENABLE`，默认**关**），但**上电时自动调用**还没接：它会让门自己跑到底，需要先定"什么条件下才允许自动跑"（本地唤醒后？还是只有上位机下令？）。目前只能手动 `learn auto on` / `learn both` |
 | **相电阻/相电感未实测** | `FOCSTEP_PHASE_RESISTANCE` 是占位值，须 `char` 命令实测回填 |
+| **无线唤醒未上板验证** | 平台层 `pa_wake.c`（PA 扫描/同步/载荷解析/周期调整）+ 应用侧监听窗口已接，出厂默认"上电即监听 + 超时回落"，详见 **§13** —— 但**尚未上板验证** |
+| **回零参数未整定** | `homing.c` + `home`/`learn`/`mark`/`dir`/`pos` 命令已实现，行程是**零点 + 满行程点**两个语义端点（见 §9）—— 但回零力矩、重复性容差、可信度容差**都必须上板实测整定** |
+
+> **已接入、上板必须优先验的两项**：
+> **OTA**（`net_ota.c` + `ota_page.html`，官方 `esp_ota_ops`/`esp_http_server`）——
+> 装进门里再拆成本极高，第一件事就是验它；
+> **Wi-Fi 控制面**（`net_ota.c`，官方 `esp_wifi`/`mdns`）—— **默认关闭**
+> （`FOCSTEP_WIFI_ENABLE=n`），因为开着会打破深睡；用 `net on` / `net off` 临时启用。
 
 ---
 
@@ -488,7 +540,7 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 板级"深睡"（`power_state = PS_SLEEP`）有两种 MCU 实现，**Kconfig 二选一**：
 
 | | `FOCSTEP_SLEEP_MODE_DEEP`（默认） | `FOCSTEP_SLEEP_MODE_LIGHT` |
-|---|---|---|
+| --- | --- | --- |
 | 唤醒 | **即复位** ⇒ 从 `app_main` 重跑 | **不复位** ⇒ 从 `esp_light_sleep_start()` 之后继续 |
 | 位置 | 睡前写 NVS（`foc_motor_save_position`），醒来 `restore_position` 做一致性检查 | 只记 RAM（`mark_sleep_angle`），醒来 `check_sleep_angle` 用**同一套判据** |
 | GPIO | **浮空** ⇒ 靠板上上下拉维持安全电平 | **保持** ⇒ 靠固件进睡前显式写入 |
@@ -539,7 +591,7 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 ### 13.1 三档待机口径（不要再只记一个数）
 
 | 档 | 何时 | 待机 | 能不能被远程唤醒 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **深睡档** | `wl off`，或监听窗口超时回落 | ≈**25~65µA** ≈ 0.6~1.56mW@24V（**不是** 10µA：TVS 高温漏电 10~50µA 已入账，见 `doc.md` §9.2 #7） | ❌ 只能本地（编码器 INT/RTC/干接点） |
 | **PA 监听档** | 上电默认 / `wl pa` | **亚 mA**：`f + 0.16/T`（C6 实测模型；`f` 待实测） | ✅ T=0.48s → ≈0.4mA，T=3.12s → ≈0.11mA |
 | 运行态 | 门在动 / 接管中 | 电机主导 | ✅ 同步保持（否则运动中收不到"停"） |
@@ -598,7 +650,7 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 ### 13.6 上板验证（按顺序）
 
 | # | 项 | 判据 |
-|---|---|---|
+| --- | --- | --- |
 | 1 | 晶振真在跑 | 启动日志**不得**出现 `32.768kHz XTAL not detected`；`grep CONFIG_RTC_CLK_SRC_EXT_CRYS sdkconfig` 确认符号生效（写错会被 Kconfig **静默忽略**）|
 | 2 | 同步 | `wl pa` → 日志 `已同步: per_adv_ival≈240ms`，`wl status` 的 T 实得 ≈480ms |
 | 3 | 指令链 | 先用 `pa_send open` 验"事件→应用"（不经射频），再用发送端真发 |

@@ -48,7 +48,7 @@ static volatile bool s_loop_resync = false; /* resume 后重置时间基 (轻睡
 static volatile foc_mode_t s_mode = FOC_MODE_IDLE;
 
 /* ── 协作式暂停 (轻睡档 / 无线监听档用) ────────────────────────
- * ⚠️ 不能用 vTaskSuspend(): FOC 循环里 loopFOC() 会读编码器 → 取 i2c_bus 互斥锁,
+ 
  *    在那里被挂起会把锁一直攥着, 别人再去访问 I2C (监听档醒来清 INT 就要读)
  *    就阻塞/超时 —— INT 清不掉 ⇒ 反复唤醒。
  * 改法: 立标志 → 循环在**安全点**(loopFOC 之前, 不持任何锁)自己交还控制权 →
@@ -71,7 +71,7 @@ static volatile uint32_t s_loop_us = 0;
 #define NVS_KEY_RANGE_ZERO "rzero_mrad"
 #define NVS_KEY_RANGE_END  "rend_mrad"
 #define NVS_KEY_RANGE_ST   "rstate"    /* range_state_t */
-/* 旧口径 (按角度大小排的 min/max) 只留作开机清理, 不再读写 */
+/* 兼容键: 早期固件按"角度大小"排的 min/max —— 只做开机清理, 不读写 */
 #define NVS_KEY_RANGE_MIN_OLD "rmin_mrad"
 #define NVS_KEY_RANGE_MAX_OLD "rmax_mrad"
 /* 标定行程时的"指纹": 行程建立在编码器方向与零位之上, 这两个 Kconfig 一改,
@@ -231,7 +231,7 @@ static void foc_loop_task(void *arg)
 
     while (s_loop_run) {
         /* ★ 协作式暂停点: 必须在 loopFOC() **之前** —— 此处不持任何锁。
-         * (在 loopFOC 里被挂起会攥着 i2c_bus 锁, 见 foc_motor_pause_loop 的说明) */
+         *  */
         if (s_loop_pause_req) {
             s_loop_paused = true;
             s_loop_resync = true; /* 放行后重置时间基 */
@@ -367,8 +367,7 @@ esp_err_t foc_motor_move_to_ext(float normalized)
     }
     if (s_range_state != RANGE_BOTH) {
         /* ★ "全开/全关"只在**零点 + 满行程点都标定**后才生效 —— 缺一个就不做任何
-         *   开度推断 (旧的"退回 Kconfig 占位角"行为已删除: 占位角与实际机构无关,
-         *   照它跑等于用错误基准冲机械限位)。 */
+         *   开度推断: 占位角与实际机构无关, 照它跑等于用错误基准冲机械限位。 */
         ESP_LOGW(TAG, "行程不完整 (%s) ⇒ 拒绝开度指令: 先标零点与满行程点",
                  foc_motor_range_state_str(s_range_state));
         return ESP_ERR_INVALID_STATE;
@@ -602,7 +601,7 @@ esp_err_t foc_motor_save_position(void)
     if (ret == ESP_OK) {
         ret = nvs_set_u8(h, NVS_KEY_RANGE_ST, (uint8_t)s_range_state);
     }
-    /* 顺手清掉旧口径 (按角度排序的 min/max) 的两个键: 已被 (零点, 满行程点) 取代,
+    /* 顺手清掉两个兼容键 (按角度排序的 min/max): 现行口径是 (零点, 满行程点),
      * 留着只会让后来的人误读。不存在时返回 NOT_FOUND, 属正常 —— 别让它冲掉 ret。 */
     (void)nvs_erase_key(h, NVS_KEY_RANGE_MIN_OLD);
     (void)nvs_erase_key(h, NVS_KEY_RANGE_MAX_OLD);

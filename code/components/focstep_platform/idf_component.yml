@@ -1,7 +1,11 @@
 dependencies:
   idf: ">=5.0"
-  # FOC 电机控制。传递拉入 arduino-foc (SimpleFOC v2.4.0 移植) + iqmath + i2c_bus
+  # FOC 电机控制。传递拉入 arduino-foc (SimpleFOC v2.4.0 移植) + iqmath (i2c_bus 组件
+  # 随之拉入, 但本工程不使用它的 API —— 编码器与 DAC 统一走 i2cdev)
   espressif/esp_simplefoc: "^1.4.1"
+  esp-idf-lib/i2cdev: "*"
+  # MCP4725 12-bit DAC (动态 VREF, doc.md §5.4)
+  esp-idf-lib/mcp4725: "*"
   # WS2812 底层 (RMT) + 闪灯模式引擎
   espressif/led_strip: "^3.0.0"
   espressif/led_indicator: "^2.1.2"

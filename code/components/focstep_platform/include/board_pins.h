@@ -7,7 +7,7 @@
  * 任何引脚改动只改这里; 其余文件一律引用本头文件, 不得硬编码 GPIO 号。
  *
  * ⚠️ 占用 22 脚 (= 模块实际引出的全部 GPIO), **LP 域与 HP 域均已用满, 0 余量**。
- *    新增功能只能复用既有信号 (例: VREF 门控复用 nSLEEP, 见 docs/doc.md §五.4)。
+ *    新增功能只能复用既有信号 (例: CAN Rs 反相复用 nSLEEP, 见 docs/doc.md §5.3)。
  */
 
 /* ---- LP 域 (GPIO0~7): 深睡期间仍供电, 支持 ext1 唤醒 ---- */
@@ -25,8 +25,8 @@
 #define PIN_STATUS_LED       9  /* 低有效 + 10k 上拉; BOOT 按键直连此脚 */
 /* GPIO10/11 ⛔ 模块未引出 —— 见下面「22 脚硬约束」 */
 /* GPIO12/13 = USB D-/D+ */
-#define PIN_I2C_SDA         14  /* KTH5701 磁编码器 (仅此一路从设备) */
-#define PIN_I2C_SCL         15  /* KTH5701。strapping 脚, 电平由 I2C 的 4.7k 上拉提供 */
+#define PIN_I2C_SDA         14  /* KTH5701 编码器 + MCP4725 DAC (0x60), 同总线 */
+#define PIN_I2C_SCL         15  /* KTH5701/MCP4725。strapping 脚, 电平由 I2C 的 4.7k 上拉提供 */
 #define PIN_DEBUG_TXD       16  /* = TXD0 (UART0 控制台), 4P 排针; 同时接 U6 的 TXD */
 #define PIN_DEBUG_RXD       17  /* = RXD0 (UART0 控制台), 4P 排针; 同时接 U6 的 RXD */
 #define PIN_DRV_nSLEEP      18  /* 两片共用, 10k 下拉, 上电默认电机断电 */
@@ -51,28 +51,25 @@
 #define PIN_CAN_RXD         PIN_DEBUG_RXD   /* GPIO17 */
 
 /*
- * ⚠️ **没有 PIN_CAN_RS** —— Rs 接在 VREF 门控 NPN 的集电极上, **随 nSLEEP 硬件派生**:
- *    nSLEEP 高 → NPN 饱和 → 集电极 ≈0.1V → Rs 低 = CAN 唤醒
- *    nSLEEP 低 → NPN 截止 → 集电极 3.4V  → Rs 高 = CAN 睡眠
- * ⇒ **软件无法独立控制 CAN 醒睡**, can_set_active() 那套接口已删除 (docs/doc.md §5.3)。
+ * ⚠️ **没有 PIN_CAN_RS** —— Rs 接在反相 N-MOS (Q3=DMN3150L) 的漏极上, **随 nSLEEP 硬件派生**:
+ *    nSLEEP 高 → Q3 导通 (栅极 100k) → 漏极 ≈0V → Rs 低 = CAN 唤醒
+ *    nSLEEP 低 → Q3 截止 → 漏极经 100k 上拉 = 3.4V → Rs 高 = CAN 睡眠
+ *    (复位/深睡 GPIO18 高阻时由 10k 下拉兜底 → Q3 关断 → 睡眠, 安全)
+ * ⇒ **软件无法独立控制 CAN 醒睡**, 故本工程不提供 can_set_active() 一类接口 (docs/doc.md §5.3)。
  */
 
 /*
- * ★ VREF 门控说明 (docs/doc.md §五.4)
+ * ★ VREF 动态档位说明 (docs/doc.md §五.4)
  *
- * DRV8874 的 VREF 由 10k+22k 从 3.4V 轨分压产生, 决定两件事:
+ * DRV8874 的 VREF 由 **MCP4725 (U8, I2C 0x60) 直接驱动**, 决定两件事:
  *   ① 斩波阈值 ITRIP = V_VREF / (R_IPROPI × A_IPROPI)
- *   ② IPROPI 的内部钳位点 = **ADC 可测上限**
- * 该分压**原方案无门控**, 常态耗 106µA @3.4V (折算 24V 输入侧 ≈17.6µA
- * ≈ 0.42mW) —— 占深睡档基线 (25~65µA@24V) 的 27~70%。改法是给分压加高边
- * P-MOS, 其栅极由 **nSLEEP (GPIO18)** 经 NPN 驱动 (基极 100k):
- * GPIO18 高 → VREF 有效; GPIO18 低 → VREF=0。
+ *   ② IPROPI 的内部钳位点 = **ADC 可测上限** —— VREF 降档 → 低电流档分辨率提升
+ * 12-bit DAC 挂在编码器同一条 I2C 总线 (GPIO14/15), 待机进 PD (VREF=0, 60nA)。
  *
- * ⚠️ 同一根集电极**还兼管 CAN 的 Rs** (见上) —— 这两件事共用一颗 NPN, 是"零器件"的由来。
- *
- * ⇒ **固件侧零改动**, 但必须遵守两条纪律 (见 power_state.c):
- *   1. power_state.c 是 GPIO18 的唯一写入方
- *   2. 深睡/故障态必须真正拉低 nSLEEP, 否则 106µA 照烧, 待机预算当场破
+ * ⇒ 固件侧: `vref_dac.c` 提供档位 API (vref_dac_set/pd), **power_state.c 是
+ *   GPIO18 与 DAC PD 的唯一编排方** (§5.4 纪律):
+ *   睡眠 nSLEEP=0 → DAC PD; 唤醒 DAC 输出目标 VREF → 稳定 → nSLEEP=1。
+ *   深睡/故障态漏掉 DAC PD = 210µA 常挂 3.4V 轨, 待机预算当场破。
  */
 
 /*
@@ -94,9 +91,8 @@
  *
  * ⚠️ JTAG: GPIO4~7 是 RISC-V JTAG 默认复用脚 (MTMS/MTDI/MTCK/MTDO),
  *    本设计分别用作 IPROPI-1、IPROPI-2、**WS2812 DIN**、分压门控 ⇒ **外部 JTAG 不可用**。
- *    ⚠️ 本行原先写作 "IPROPI-2" 紧接斜杠再接 "**WS2812 DIN**" —— 斜杠与星号相邻
- *       会构成 C 的嵌套注释起始符, 被 GCC 判为 -Wcomment 直接编译失败 (已修)。
- *       **本文件内注意: 斜杠不要紧邻星号。**
+ *    ⚠️ **本文件内注意: 斜杠不要紧邻星号** —— 两者相邻会构成 C 的嵌套注释起始符,
+ *       被 GCC 判为 -Wcomment 直接编译失败。
  *    控制台另有两条通路: 4P 排针 (GPIO16/17, 默认) 与 USB-Serial-JTAG (GPIO12/13, 用 CAN 时)。
  */
 

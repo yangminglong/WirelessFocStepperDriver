@@ -8,7 +8,7 @@
  *   本文件                          只做初始化和任务编排, 不含业务逻辑
  *
  * ⚠️ 本文件**不得直接操作 GPIO18 (nSLEEP)** —— 那是平台 power_state.c 的独占职责,
- *    因为它同时硬件门控 **VREF 分压** (关不断就常态耗 106µA ≈ 0.42mW@24V)
+ *    GPIO18 与 DAC PD 的编排顺序由 power_state.c 保证 (§5.4: 先断电再 PD / 先 DAC 后唤醒)
  *    与 **CAN 收发器的 Rs** (docs/doc.md §5.3) —— **一根脚管三件事**。
  */
 
@@ -194,8 +194,12 @@ void app_main(void)
             ESP_ERROR_CHECK(wakeup_enable_encoder_ext1());
 #endif
             wakeup_log_config();
-            ESP_LOGI(TAG, "进入深睡 (nSLEEP 已拉低 ⇒ VREF 门控关断)");
-            ESP_LOGI(TAG, "⚠️ 若此时 VREF 分压没关断, 会持续耗 106µA = 0.42mW@24V");
+            ESP_LOGI(TAG, "进入深睡 (nSLEEP 已拉低 ⇒ DRV 断电, DAC 已 PD)");
+            ESP_LOGI(TAG, "⚠️ 若此时 DAC 未进 PD, 会持续耗 210µA (正常模式)");
+
+            /* 灯带全黑必须**确认已锁存**再睡 —— led_set_color(OFF) 是异步的,
+             * 见 led_off_and_wait() 注释 (§6.3 步骤 5)。 */
+            led_off_and_wait();
 
             esp_deep_sleep_start();
             /* 不会返回 */
@@ -211,7 +215,11 @@ void app_main(void)
             ESP_ERROR_CHECK(wakeup_enable_encoder_ext1());
 #endif
             wakeup_log_config();
-            ESP_LOGI(TAG, "进入轻睡 (唤醒不复位; nSLEEP 已拉低 ⇒ VREF 门控关断)");
+            ESP_LOGI(TAG, "进入轻睡 (唤醒不复位; nSLEEP 已拉低 ⇒ DRV 断电, DAC 已 PD)");
+
+            /* 灯带全黑必须**确认已锁存**再睡 —— led_set_color(OFF) 是异步的,
+             * 见 led_off_and_wait() 注释 (§6.3 步骤 5)。 */
+            led_off_and_wait();
 
             /* 醒来先看 INT 电平再决定: KTH5701 的 INT 是**锁存**的 ⇒
              * "这次醒来是不是手拉"只看电平就够, 不依赖唤醒掩码

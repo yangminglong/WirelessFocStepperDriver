@@ -103,8 +103,8 @@ esp_err_t bus_voltage_read_mv(int *mv)
      *
      * ⚠️ **导通时间直接决定待机开销, 必须走 µs 级忙等**:
      *    导通期间 分压吸 VM/108.2k ≈ 233µA + 恒流下沉栅极支路 79µA = **312µA**。
-     *    @100Hz + 70µs ⇒ 平均 **2.2µA@25.2V**(doc.md §六 取 ≈2.1µA);
-     *    若导通 2ms ⇒ **62µA —— 差 28 倍**, 单这一项就吃掉整个深睡档预算。
+     *    @100Hz + 70µs ⇒ 平均 **2.2µA@25.2V** (折算 24V ≈2.3µA, doc.md §五.1);
+     *    若导通 2ms ⇒ **65µA —— 差 20 倍**, 单这一项就吃掉整个深睡档预算。
      *    ⇒ **不能用 vTaskDelay**: CONFIG_FREERTOS_HZ=1000 时最小就是 1ms, 下不去。 */
     esp_rom_delay_us(CONFIG_FOCSTEP_VBUS_GATE_SETTLE_US);
 

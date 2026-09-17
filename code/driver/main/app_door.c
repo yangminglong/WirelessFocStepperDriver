@@ -71,7 +71,7 @@ app_mode_t app_door_mode(void)
 }
 
 /* ★ 平台只提供颜色 (LED_COLOR_*), **"哪个状态用什么颜色"是应用的决定** ——
- *  这就是 docs/doc.md §10.3 那一列的落点。重构前这个映射写在平台层里。 */
+ *  这就是 docs/doc.md §10.3 那一列的落点。 */
 static void set_mode(app_mode_t m)
 {
     if (m == s_mode) {

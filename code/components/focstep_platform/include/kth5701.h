@@ -39,9 +39,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
-#include "driver/i2c.h"
 #include "driver/gpio.h"
-#include "i2c_bus.h"
+#include "i2cdev.h"
 #include "common/base_classes/Sensor.h"
 
 /* ---- 命令字 ---- */
@@ -132,8 +131,9 @@ private:
     esp_err_t tx_write(const uint8_t *buf, size_t len);
     esp_err_t tx_read(uint8_t *buf, size_t len);
 
-    i2c_bus_handle_t _bus = nullptr;
-    i2c_bus_device_handle_t _dev = nullptr;
+    /* i2cdev 管理的设备描述符。总线 (i2c_master bus) 由 i2cdev 统一创建/复用,
+     * 与 MCP4725 共享同一条物理总线 (GPIO14/15), 见 doc.md §5.4。 */
+    i2c_dev_t _dev = {};
     i2c_port_t _port;
     gpio_num_t _scl;
     gpio_num_t _sda;

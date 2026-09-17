@@ -10,10 +10,10 @@
  *   ⚠️ U6 的 RXD 与 GPIO17 之间串有 **1.5kΩ** —— 那是为了让 USB-UART 适配器在
  *      收发器在线时仍能拉低 GPIO17。**属硬件职责, 软件不用管**。
  *
- * ★ **Rs 没有 GPIO**: 它挂在 VREF 门控 NPN 的集电极上, **随 nSLEEP 硬件派生** ——
- *     nSLEEP(GPIO18) 高 → Rs 低 = CAN 唤醒;  nSLEEP(GPIO18) 低 → Rs 高 = CAN 睡眠。
+ * ★ **Rs 没有 GPIO**: 它挂在反相 N-MOS (Q3=DMN3150L) 的漏极上, **随 nSLEEP 硬件派生** ——
+ *     nSLEEP(GPIO18) 高 → Q3 导通 → Rs 低 = CAN 唤醒;  nSLEEP(GPIO18) 低 → Q3 截止 → Rs 高 = CAN 睡眠。
  *   ⇒ 上电默认 nSLEEP=低 ⇒ **CAN 默认睡眠**(硬件保证); 且**软件无法独立控制 CAN 醒睡**。
- *   ⇒ 本模块**没有** can_set_active() (原接口随 GPIO 取消而删除)。
+ *   ⇒ 本模块**不提供** can_set_active() 一类接口 —— CAN 醒睡完全由硬件派生, 软件无从插手。
  *
  * ⚠️ docs/doc.md 尚未定 CAN 波特率 —— 默认 500k 是占位项, 见 §9.1 #3。
  * ⚠️ 菊花链拓扑: 只在总线两端节点保留终端电阻, 中间节点拆除 (板载为分裂终端 2×60Ω)。

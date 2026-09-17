@@ -8,6 +8,7 @@
 #include "net_ota.h"
 #include "pa_wake.h"
 #include "power_state.h"
+#include "vref_dac.h"
 #include "wakeup.h"
 
 #include <cmath>
@@ -232,25 +233,26 @@ static int do_gate(int argc, char **argv)
     return 0;
 }
 
-/* ---------------- 自检 6: VREF 门控两态 ---------------- */
+/* ---------------- 自检 6: MCP4725 动态 VREF (档位/PD) ---------------- */
 static int do_vref(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("用法: vref <0|1>   0 = nSLEEP 拉低, 1 = nSLEEP 拉高\n");
+        printf("用法: vref <档位A>   例: vref 1.5 → VREF≈2.35V; vref 0 → 0V 并进 PD\n");
         return 1;
     }
-    int on = atoi(argv[1]);
-    /* ⚠️ 这里直接写 GPIO18 仅用于**自检**。正常运行期 GPIO18 由 power_state.c 独占
-     *    —— 它一根脚管三件事: DRV 使能 / VREF 门控 / CAN 的 Rs (docs/doc.md §5.3)。 */
-    gpio_set_level((gpio_num_t)PIN_DRV_nSLEEP, on ? 1 : 0);
-    printf("nSLEEP(GPIO%d) → %d\n", PIN_DRV_nSLEEP, on);
-    if (on) {
-        printf("请量 **VREF 引脚** ≈ 2.34V (10k+22k 从 3.4V 分压)。\n");
-        printf("⚠️ 抬 nSLEEP 前务必先跑 brake 命令验 EN/PH 接法!\n");
+    float a = atof(argv[1]);
+    /* ⚠️ 自检命令: 直接操作 DAC (power_state 之外的唯一例外, doc.md §5.4 纪律)。
+     *    正常运行期 DAC 输出/PD 由 power_state.c 编排。 */
+    if (a <= 0.0f) {
+        esp_err_t r1 = vref_dac_set(0.0f);
+        esp_err_t r2 = vref_dac_pd();
+        printf("VREF 0V + PD: set=%s pd=%s\n", esp_err_to_name(r1), esp_err_to_name(r2));
+        printf("判据: 量 **VREF 引脚** = 0V, 且总电流回落 (PD 生效)。\n");
     } else {
-        printf("请量 **VREF 引脚** = 0V。\n");
-        printf("这一态若不为 0, 说明 P-MOS 门控没关断 ⇒ 分压持续耗 106µA@3.4V\n"
-               "(折算 24V 输入侧 ≈17.6µA), 占深睡档基线 (25~65µA@24V) 的 27~70%%。\n");
+        esp_err_t r = vref_dac_set(a);
+        printf("ITRIP=%.2fA → VREF≈%.3fV: %s\n", a, vref_dac_voltage_for(a), esp_err_to_name(r));
+        printf("请量 **VREF 引脚** ≈ %.3fV (doc.md §5.4 档位表)。\n", vref_dac_voltage_for(a));
+        printf("⚠️ 抬 nSLEEP 前务必先跑 brake 命令验 EN/PH 接法!\n");
     }
     return 0;
 }
@@ -319,7 +321,7 @@ static int do_ipropi(int argc, char **argv)
            CONFIG_FOCSTEP_A_IPROPI_UA_PER_A, CONFIG_FOCSTEP_R_IPROPI_OHM);
     printf("⚠️ 手册正文写 450、应用示例写 455 µA/A —— 用已知负载比对后按实测回填。\n");
     printf("⚠️ V_IPROPI 被内部钳位到 V_VREF ⇒ 可测上限 ≈ %.2f A, 再高读数不再上升。\n",
-           (double)(2.34f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
+           (double)(2.35f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
     return 0;
 }
 
@@ -576,7 +578,7 @@ static int do_learn(int argc, char **argv)
                 return 1;
             }
         } else {
-            /* 旧写法 learn closed|open 已废弃: 它把"端点"与"方向"绑死, 反装机构会朝
+            /* 不提供 learn closed|open: 它把"端点"与"方向"绑死, 反装机构会朝
              * 错误方向顶限位 (还会把那一点标成端点)。宁可报错也不要猜。 */
             printf("用法: learn [both|zero|end] | learn auto [on|off]\n"
                    "  learn both            一次到底: 依次顶两端, 建立零点+满行程点\n"
@@ -584,7 +586,7 @@ static int do_learn(int argc, char **argv)
                    "  learn zero            把上一次 `home` 测到的接触点**落定为零点**\n"
                    "  learn end             同上, 落定为**满行程点** (要求已有零点)\n"
                    "  流程: home pos|neg  →  看接触点是否合理  →  learn zero|end\n"
-                   "⚠️ 旧写法 closed/open 与 `learn end <方向>` 都已废弃:\n"
+                   "⚠️ closed/open 与 `learn end <方向>` 不接受:\n"
                    "   标定前能给的只有**方向**, 测量之后能给的只有**端点身份**, 不要互相推导\n");
             return 1;
         }
@@ -759,7 +761,7 @@ static int do_stall(int argc, char **argv)
     printf("阈值     : %d mA (矢量幅值峰值), 持续 %d ms\n",
            CONFIG_FOCSTEP_STALL_CURRENT_MA, CONFIG_FOCSTEP_STALL_MS);
     printf("实测上限 : ≈%.2f A (V_IPROPI 被钳位到 V_VREF, 再高读数不再上升)\n",
-           (double)(2.34f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
+           (double)(2.35f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
     printf("\n用法: stall | stall reset\n");
     printf("整定: 跑 normal 负载, 用 `ipropi` 反复读, 记录稳态峰值, 取其 1.5~2 倍。\n");
     return 0;
@@ -920,7 +922,7 @@ esp_err_t platform_console_init(void)
                         TAG, "repl usj init failed");
 #endif
 
-    /* 平台自己拿编码器句柄 —— 不再需要应用层注入 */
+    /* 平台自己拿编码器句柄, 应用层无需注入 */
     s_enc = static_cast<KTH5701 *>(foc_motor_encoder_handle());
 
     s_ready = true;
@@ -935,7 +937,7 @@ esp_err_t platform_console_init(void)
     reg_platform("cal",    "用 circle 的结果算硬铁/软铁并应用",            do_cal);
     reg_platform("vbus",   "读母线电压",                                 do_vbus);
     reg_platform("gate",   "gate <0|1> 手动开关母线分压门控",              do_gate);
-    reg_platform("vref",   "vref <0|1> 手动开关 nSLEEP, 量 VREF",         do_vref);
+    reg_platform("vref",   "vref <档位A> 设 MCP4725 输出 (0=0V+PD)",        do_vref);
     reg_platform("brake",  "两相 EN 拉低(brake), 验线: 手转应有阻尼",    do_brake);
     reg_platform("jog",    "jog <v> 小电压点动, 确认转向",                do_jog);
     reg_platform("align",  "initFOC 电角对齐",                           do_align);

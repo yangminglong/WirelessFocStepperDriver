@@ -1,7 +1,8 @@
 /*
  * 应用层命令台 —— 用 platform_console_register() 追加, 不改平台层文件
  *
- * 对比重构前: 命令全挤在 cmd_console.cpp 的同一个函数里, 加一条就得动驱动层。
+ * ★ 分界: 平台自检命令注册在 platform_console.c 里, 应用命令在这里追加 ——
+ *   两边互不修改对方的文件。
  */
 
 #include "app_door.h"

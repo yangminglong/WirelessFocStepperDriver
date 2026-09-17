@@ -135,7 +135,7 @@ static homing_result_t apply_endpoint(bool as_zero, float angle)
  *
  * ⚠️ 判据①必须用**相对**基线, 不能用绝对阈值。绝对阈值会踩这个坑:
  *    回零力矩下自由运行的电流本来就接近 ITRIP, 绝对阈值在接触前就已满足,
- *    判据形同虚设, 回零退化成"只看位置停没停"。 (初版就是这么写的)
+ *    判据形同虚设, 回零退化成"只看位置停没停"。
  */
 static homing_result_t approach(home_dir_t dir, float *out_contact_rad)
 {

@@ -58,7 +58,7 @@ menu "FocStepper 平台层"
                       · 符号有 1 个 FOC 周期滞后
                       · 两相非同时采样 (~40µs 偏差)
                       · AERR ±6% (1–2A 档), <0.4A 有固定偏置 ⇒ 传感器偏粗
-                      · 超过 ITRIP(≈1.49A) 读数被钳位不再上升
+                      · 超过 ITRIP(≈1.494A) 读数被钳位不再上升
 
                     建议先用 voltage 跑通 FOC 与限位, 再切本项调电流环。
         endchoice
@@ -68,7 +68,7 @@ menu "FocStepper 平台层"
             default 1500
             help
                 foc_current / estimated_current 的电流限幅。
-                ⚠️ 必须 <= ITRIP (≈1.49A), 否则环会要求一个 DRV8874 给不出的电流。
+                ⚠️ 必须 <= ITRIP (≈1.494A), 否则环会要求一个 DRV8874 给不出的电流。
                 同时它也是 PID_current_d/q 的输出限幅 (updateCurrentLimit 会同步)。
 
         config FOCSTEP_PID_CURR_P
@@ -173,9 +173,8 @@ menu "FocStepper 平台层"
                 机械零位到电气零位的偏移。initFOC() 会自动对齐电气角,
                 本项只用于让 sensor 的 0 对准机构 0 (推拉门的"全关"位置)。
 
-        # ⚠️ 这里原来有 ENCODER_MIN/MAX_ANGLE 两个占位行程角, 已删除:
-        #    行程现在只有**标定**一个来源 (零点 + 满行程点, 存 NVS), 未标定时
-        #    foc_motor_move_to() 直接拒绝执行 —— 占位角与真实机构无关,
+        # ⚠️ 行程只有一个来源: **标定** (零点 + 满行程点, 存 NVS)。
+        #    未标定时 foc_motor_move_to() 直接拒绝执行 —— 任何占位角都与真实机构无关,
         #    照它跑等于用错误基准冲机械限位。
 
         config FOCSTEP_ENCODER_WAKE_DIFF
@@ -205,12 +204,12 @@ menu "FocStepper 平台层"
             range 0 12
             default 12
             help
-                12dB ⇒ 量程约 0~3.1V。IPROPI 在 1.5A 时约 2.36V (但被钳位到 2.34V),
-                必须用 12dB 否则量程不够。
+                12dB ⇒ 量程约 0~3.1V。IPROPI 在 1.5A 档 (VREF=2.35V) 时对应电压
+                ≈2.35V 并被 VREF 钳位, 必须用 12dB 否则量程不够。
 
         config FOCSTEP_R_IPROPI_OHM
             int "R_IPROPI (Ω)"
-            default 3500
+            default 3480
             help
                 每片 DRV8874 一颗, 对地 1%。将 IPROPI 电流转成电压供 ADC 读取。
 
@@ -226,8 +225,10 @@ menu "FocStepper 平台层"
             int "设计斩波阈值 ITRIP (mA)"
             default 1500
             help
-                由 VREF 分压 (10k+22k from 3.4V ⇒ 2.34V) 与 R_IPROPI 共同决定。
-                仅用于换算与自检提示, 固件不写 VREF。
+                由 MCP4725 动态 VREF 与 R_IPROPI 共同决定 (VREF = ITRIP × 1.566 V/A,
+                R_IPROPI=3.48k)。doc.md §5.4 档位表: 0.3A→0.47V / 1.0A→1.57V /
+                1.5A→2.35V / 1.8A→2.82V; VREF≥3.0V 后 DRV 内部钳位 (封顶 1.915A),
+                固件 clamp ≤1.85A。仅用于换算与自检提示; 实际输出走 vref_dac.c。
 
         config FOCSTEP_STALL_CURRENT_MA
             int "堵转判定电流 (mA, 矢量幅值)"
@@ -238,9 +239,9 @@ menu "FocStepper 平台层"
 
                 ⚠️ 不要用单相瞬时值 —— 稳态下 ia=I·cosθ、ib=I·sinθ, 单相值随电角度在
                 0.707·I ~ I 之间摆动, 拿去比阈值会让"持续时间"条件永远凑不满,
-                一次都触发不了 (初版就是这么写的)。
+                一次都触发不了。
 
-                ⚠️ 因为 VIPROPI 被钳位到 V_VREF, **实测上限约 1.49A**, 超过后读数
+                ⚠️ 因为 VIPROPI 被钳位到 V_VREF, **实测上限约 1.494A** (VREF=2.35V 档),
                 不再上升 ⇒ 只能判"到顶", 不能测幅值。故本值**必须 < ITRIP**。
                 整定方法: 先跑 normal 负载记录稳态峰值, 取其 1.5~2 倍。
 
@@ -269,7 +270,7 @@ menu "FocStepper 平台层"
 
                 ⚠️ **这个值还直接决定"电流抬升"判据有没有动态范围**:
                   自由运行电流 ≈ 力矩 / 相电阻。以 R=1.2Ω 为例:
-                    1500mV → 1.25A, 到钳位 1.49A 只剩 1.19×  ⇒ 判据几乎不可用
+                    1500mV → 1.25A, 到钳位 1.494A 只剩 1.19×  ⇒ 判据几乎不可用
                      800mV → 0.67A, 余量 2.23×               ⇒ 良好
                      600mV → 0.50A, 余量 2.98×               ⇒ 更好
                 所以**力矩越小, 接触检测越灵敏**, 同时还更保护机构 —— 两边同向。
@@ -609,8 +610,8 @@ menu "FocStepper 平台层"
             default 30000
             help
                 发射端在场时几十毫秒就能发现, 所以先快扫一段时间保证响应;
-                超时说明对端不在, 转"慢扫"(30ms/10000ms ≈ 0.3%, 亚 mA 级),
-                之后发现延迟变长但不再烧电。
+                超时说明对端不在, 转"慢扫"(30ms/10000ms ≈ 0.3%, 亚 mA 级):
+                代价是发现延迟变长, 换来持续电流降到亚 mA 级。
 
         config FOCSTEP_SLEEP_ENABLE
             bool "允许进入睡眠档 (PS_SLEEP)"
@@ -625,9 +626,9 @@ menu "FocStepper 平台层"
             default FOCSTEP_SLEEP_MODE_DEEP
             help
                 板级"深睡"(power_state = PS_SLEEP) 用哪种 MCU 睡眠实现。
-                两者对控制脚的取值要求完全相同 —— 注意现在**只剩 nSLEEP(GPIO18) 一根**:
-                WS2812 门控已移除 (§五.2), CAN 的 Rs 又挂在这根 nSLEEP 的派生网络上
-                (§5.3), 所以 §10.3 那张表的控制脚列只剩它一个真变量,
+                两者对控制脚的取值要求完全相同 —— **真变量只有 nSLEEP(GPIO18) 一根**:
+                CAN 的 Rs 挂在这根线的硬件派生网络上 (§5.3), 而灯带的"灭"靠固件发全黑
+                而非控制线 (§五.2), 所以 §10.3 那张表的控制脚列只剩它一个,
                 差别全在 MCU 侧 (docs/doc.md §5.6 / §10.3):
 
                 - DeepSleep: 功耗最低 (~10µA), 唤醒即复位 ⇒ 从 app_main 重跑,

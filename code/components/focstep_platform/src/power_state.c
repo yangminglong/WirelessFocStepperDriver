@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_sleep.h"
+#include "vref_dac.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -31,13 +32,13 @@ static volatile bool s_nfault_flag = false;
 /* ------------------------------------------------------------------
  * nSLEEP: 本文件的唯一核心职责
  * ⚠️ 全工程**只有这里**可以写 GPIO18。理由见 power_state.h 顶部:
- *    SLEEP/FAULT 态若忘了拉低 nSLEEP, VREF 分压会持续耗 106µA@3.4V
- *    (折算 24V 输入侧 ≈17.6µA ≈ 0.42mW), 占深睡档基线 (25~65µA@24V) 的 27~70%。
+ *    SLEEP/FAULT 态若忘了拉低 nSLEEP: DRV8874 内部稳压器与栅驱持续运行 (mA 级),
+ *    且 DAC 未进 PD 会再 +210µA (正常模式常挂 3.4V 轨) —— 待机预算当场破。
  * ------------------------------------------------------------------ */
 static void nsleep_set(bool enable_motor)
 {
     gpio_set_level((gpio_num_t)PIN_DRV_nSLEEP, enable_motor ? 1 : 0);
-    /* VREF 门控 P-MOS 的栅极就挂在这根线上, 硬件自动跟随, 固件无需额外动作 */
+    /* CAN Rs 反相 N-MOS (Q3) 的栅极经 100k 也挂在这根线上, 硬件自动跟随, 固件无需额外动作 */
 }
 
 /* ------------------------------------------------------------------
@@ -81,11 +82,12 @@ static void enter_state(power_state_t st)
 
     switch (st) {
     case PS_SLEEP:
-        /* 顺序: 停运动 → 电机断电 → 编码器转低功耗档 → (轻睡档) 暂停 FOC 任务
-         * ⚠️ `nsleep_set(false)` **一根脚同时办三件事** (见 power_state.h 文件头):
-         *    DRV 断电 + VREF 门控关断 + **CAN 的 Rs 转睡眠** —— 不需要额外调用。 */
+        /* 顺序: 停运动 → 电机断电 → DAC PD → 编码器转低功耗档 → (轻睡档) 暂停 FOC 任务
+         * ⚠️ `nsleep_set(false)` 一根脚办两件事: DRV 断电 + **CAN 的 Rs 转睡眠** (硬件派生)。
+         *    VREF 走 MCP4725: 先断电再发 DAC PD (VREF=0, 60nA) —— §5.4 顺序不可颠倒。 */
         foc_motor_stop();
         nsleep_set(false);
+        vref_dac_pd();
         foc_motor_encoder_set_mode(ENC_CMD_WAKEUP_SLEEP);
 #if CONFIG_FOCSTEP_SLEEP_MODE_LIGHT || CONFIG_FOCSTEP_PA_WAKE_ENABLE
         /* 需要"系统能真正 idle"的两档都要暂停 FOC 任务:
@@ -102,8 +104,13 @@ static void enter_state(power_state_t st)
         /* 先把被暂停的 FOC 任务放回来 (它恢复时会自动重置时间基) */
         foc_motor_resume_loop();
 #endif
-        /* 编码器先切连续档 (否则读不到角度), 再使能电机 */
+        /* 编码器先切连续档 (否则读不到角度); VREF 先输出目标档再抬 nSLEEP (§5.4 顺序) */
         foc_motor_encoder_set_mode(ENC_CMD_CONTINUOUS);
+        esp_err_t vret = vref_dac_set_default();
+        if (vret != ESP_OK) {
+            ESP_LOGW(TAG, "DAC 输出失败: 保持上次 VREF (100k 兜底 → 限流最小, 安全)");
+        }
+        vTaskDelay(pdMS_TO_TICKS(2)); /* DAC 输出建立余量 */
         nsleep_set(true);
         /* ★ 唤醒后先切 brake 泄放反灌能量, 再读角度 (§10.3 硬性行为)。
          *   PH/EN 模式下 brake = 两相 EN 恒低 = 两个低边导通。 */
@@ -113,9 +120,10 @@ static void enter_state(power_state_t st)
         break;
 
     case PS_FAULT:
-        /* 硬件故障: 电机必须断电 */
+        /* 硬件故障: 电机必须断电。ISR 已先拉低 nSLEEP (立即), 此处补 DAC PD (I2C 只能在任务上下文) */
         foc_motor_stop();
         nsleep_set(false);
+        vref_dac_pd();
         s_fault_since = xTaskGetTickCount();
         break;
     }
@@ -135,7 +143,7 @@ esp_err_t power_state_init(void)
     ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "nSLEEP gpio config failed");
 
     /* 上电安全态: 电机断电。板上 GPIO18 本来就有 10k 下拉, 这里再显式拉低,
-     * 保证 VREF 门控 P-MOS 关断, 同时让 CAN 的 Rs 保持睡眠。 */
+     * 保证 DRV 断电, 同时让 CAN 的 Rs 保持睡眠 (DAC PD 由 vref_dac_init 完成)。 */
     nsleep_set(false);
 
     /* nFAULT: 低有效, 10k 上拉。任一下降沿立即断电。 */
@@ -152,7 +160,7 @@ esp_err_t power_state_init(void)
                         TAG, "nFAULT isr add failed");
 
     s_inited = true;
-    ESP_LOGI(TAG, "init done; nSLEEP=低 (电机断电, VREF 门控关断)");
+    ESP_LOGI(TAG, "init done; nSLEEP=低 (电机断电, CAN Rs 睡眠), DAC=PD");
     return ESP_OK;
 }
 

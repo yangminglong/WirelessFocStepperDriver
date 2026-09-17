@@ -4,10 +4,9 @@
  * 用 DRV8874 IPROPI 实现 SimpleFOC 的 CurrentSense —— 支撑 foc_current
  *
  * ── 为什么这条路走得通 ────────────────────────────────────────
- * 之前判断"步进电机做不到 foc_current"是**错的**。错在把
- * `LowsideCurrentSense`（一个绑定 MCPWM 定时器 + 三电阻采样的**具体实现**）
- * 当成了拿到 CurrentSense 的唯一途径。实际上 `CurrentSense` 是**抽象接口**,
- * 只有两个纯虚 (init / getPhaseCurrents), 和 Sensor 一样可以自己写子类。
+ * `LowsideCurrentSense`（绑定 MCPWM 定时器 + 三电阻采样的**具体实现**）不是拿到
+ * `CurrentSense` 的唯一途径。`CurrentSense` 是**抽象接口**, 只有两个纯虚
+ * (init / getPhaseCurrents), 和 Sensor 一样可以自己写子类。
  *
  * 而且基类**已经内建了步进分支**, 不是为我们打的补丁:
  *   - `StepperDriver::type()` 返回 `DriverType::Stepper`
@@ -39,7 +38,7 @@
  *  3. **两相不是同时采样**: 两次 oneshot 读相隔约 40µs。
  *  4. **精度上限**: AERR 在 1–2A 档 ±6%, <0.4A 档是 ±30mA 固定偏置 ⇒
  *     作为电流环反馈传感器偏粗。
- *  5. **超 ITRIP 就测不到**: V_IPROPI 被钳位到 V_VREF ⇒ 可测上限 ≈1.49A,
+ *  5. **超 ITRIP 就测不到**: V_IPROPI 被钳位到 V_VREF ⇒ 可测上限 ≈1.494A,
  *     再高读数不再上升 (但 DRV8874 自己会斩波, 环也不会要求更高)。
  */
 

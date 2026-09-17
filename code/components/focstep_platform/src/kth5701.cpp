@@ -31,7 +31,7 @@ KTH5701::~KTH5701()
 /* ---------------- 底层事务 ----------------
  * 参考实现用 Linux 的 i2c_master_send + i2c_master_recv = **两段独立事务**
  * (各自带 START/STOP), 不是 repeated-start。这里照做。
- * i2c_bus_cmd_begin 内部会取总线互斥锁, 故无需自建锁。
+ * i2c_dev_write/read 经 i2cdev 内部总线锁与设备互斥锁, 故无需自建锁。
  */
 
 esp_err_t KTH5701::tx_write(const uint8_t *buf, size_t len)
@@ -39,14 +39,8 @@ esp_err_t KTH5701::tx_write(const uint8_t *buf, size_t len)
     if (!_installed) {
         return ESP_ERR_INVALID_STATE;
     }
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (uint8_t)((_addr << 1) | I2C_MASTER_WRITE), true);
-    i2c_master_write(cmd, (uint8_t *)buf, len, true);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_bus_cmd_begin(_dev, cmd);
-    i2c_cmd_link_delete(cmd);
-    return ret;
+    /* i2c_dev_write 自带 START...STOP, 与芯片要求的"独立写事务"一致 */
+    return i2c_dev_write(&_dev, NULL, 0, buf, len);
 }
 
 esp_err_t KTH5701::tx_read(uint8_t *buf, size_t len)
@@ -54,14 +48,8 @@ esp_err_t KTH5701::tx_read(uint8_t *buf, size_t len)
     if (!_installed) {
         return ESP_ERR_INVALID_STATE;
     }
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (uint8_t)((_addr << 1) | I2C_MASTER_READ), true);
-    i2c_master_read(cmd, buf, len, I2C_MASTER_LAST_NACK);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_bus_cmd_begin(_dev, cmd);
-    i2c_cmd_link_delete(cmd);
-    return ret;
+    /* i2c_dev_read 自带 START...STOP (独立读事务), 由 i2cdev 填充 7 位地址与读方向 */
+    return i2c_dev_read(&_dev, NULL, 0, buf, len);
 }
 
 void KTH5701::init()
@@ -72,20 +60,21 @@ void KTH5701::init()
 
 esp_err_t KTH5701::begin()
 {
-    i2c_config_t conf = {};
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = _sda;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_io_num = _scl;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = _clk_hz;
-    conf.clk_flags = 0;
+    /* i2cdev 全局初始化 (幂等)。总线按需创建: 首个设备 (KTH5701 或 MCP4725)
+     * 初始化时建 i2c_master bus, 后续设备复用同一总线 (pin 校验一致)。 */
+    esp_err_t ret = i2cdev_init();
+    ESP_RETURN_ON_ERROR(ret, TAG, "i2cdev_init failed");
 
-    _bus = i2c_bus_create(_port, &conf);
-    ESP_RETURN_ON_FALSE(_bus != nullptr, ESP_FAIL, TAG, "i2c_bus_create failed");
-
-    _dev = i2c_bus_device_create(_bus, _addr, _clk_hz);
-    ESP_RETURN_ON_FALSE(_dev != nullptr, ESP_FAIL, TAG, "i2c_bus_device_create failed");
+    _dev.port = _port;
+    _dev.addr = _addr;
+    _dev.addr_bit_len = I2C_ADDR_BIT_LEN_7;
+    _dev.cfg.sda_io_num = _sda;
+    _dev.cfg.scl_io_num = _scl;
+    _dev.cfg.sda_pullup_en = true;
+    _dev.cfg.scl_pullup_en = true;
+    _dev.cfg.master.clk_speed = _clk_hz;
+    ret = i2c_dev_create_mutex(&_dev);
+    ESP_RETURN_ON_ERROR(ret, TAG, "i2c_dev_create_mutex failed");
 
     _installed = true;
 
@@ -102,13 +91,11 @@ esp_err_t KTH5701::begin()
 
 void KTH5701::deinit()
 {
-    if (_dev) {
-        i2c_bus_device_delete(&_dev);
-        _dev = nullptr;
-    }
-    if (_bus) {
-        i2c_bus_delete(&_bus);
-        _bus = nullptr;
+    /* 从 i2cdev 总线移除设备并释放设备互斥锁。总线句柄由 i2cdev 统一管理,
+     * 此处不删除 (其他设备可能仍在用)。 */
+    if (_installed) {
+        i2c_dev_delete_mutex(&_dev);
+        _dev = {};
     }
     _installed = false;
 }

@@ -5,8 +5,7 @@
  *
  * ── 两个关键设计选择, 都有源码/手册依据 ──────────────────────
  *
- * ★ 1. 用 `StepperDriver2PWM` + **PH/EN 模式 (PMODE=低)** —— 即 doc.md v0.7 §10.1 定稿口径
- *      (v0.6 及以前文档写的 `StepperDriver4PWM` + PMODE=高**已作废**)。依据 DRV8874 数据手册真值表:
+ * ★ 1. 用 `StepperDriver2PWM` + **PH/EN 模式 (PMODE=低)**。依据 DRV8874 数据手册真值表:
  *
  *        Table 3 PH/EN (PMODE=低):  EN=0 → **Brake (Low-Side Slow Decay)**
  *        Table 4 PWM  (PMODE=高):  IN1=IN2=0 → **Coast (Hi-Z)**
@@ -48,9 +47,9 @@ extern "C" {
 /*
  * 运动模式 —— **通用, 不含应用语义**。
  *
- * ★ 重构要点: 原来这里有个 `FOC_MODE_ASSIST`(手拉助动)。但"助动"是**门机概念**,
- *   不是电机概念 —— 换个项目(比如云台、机械臂)这个概念就不存在。
- *   现在只提供通用的 `FOC_MODE_TORQUE`, 应用自己决定何时给多大力矩。
+ * ★ **本层不设"助动"档**: "助动"是**门机概念**, 不是电机概念 ——
+ *   换个项目(比如云台、机械臂)这个概念就不存在。故只提供通用的
+ *   `FOC_MODE_TORQUE`, 应用自己决定何时给多大力矩。
  *   门的助动逻辑在 app_door.c 里。
  */
 typedef enum {
@@ -63,7 +62,7 @@ typedef enum {
 esp_err_t foc_motor_init(void);
 
 /* 使能/失能电机。
- * ⚠️ 实现方**不碰 nSLEEP** —— 那是 power_state.c 的唯一职责 (它同时门控 VREF)。 */
+ * ⚠️ 实现方**不碰 nSLEEP** —— 那是 power_state.c 的唯一职责 (它与 DAC PD 的编排见 power_state.c, doc.md §5.4)。 */
 esp_err_t foc_motor_enable(bool on);
 
 /* ★ 唤醒后必须**先切 brake** 泄放反灌能量, 再读角度 (docs/doc.md §10.3 硬性行为)。
@@ -156,7 +155,7 @@ esp_err_t foc_motor_restore_position(void);
  *   · 开度映射: `target = zero_rad + normalized × span`
  *
  * 三态 (没有"有行程无零点"这种状态):
- *   NONE        未标定 ⇒ **拒绝一切开度指令** (不再退回任何占位值)
+ *   NONE        未标定 ⇒ **拒绝一切开度指令** (无任何占位值兜底)
  *   ZERO_ONLY   只标了零点 ⇒ 位置可锚定, 但开度不可用
  *   BOTH        零点 + 满行程点 ⇒ 0%/100% 生效 (即"全关/全开")
  *

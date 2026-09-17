@@ -1,4 +1,70 @@
 dependencies:
+  esp-idf-lib/esp_idf_lib_helpers:
+    component_hash: 689853bb8993434f9556af0f2816e808bf77b5d22100144b21f3519993daf237
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.4.0
+  esp-idf-lib/i2cdev:
+    component_hash: ad8981cc64533dcaced5107d72e42bcebe79345e194e82795792af531b300ce3
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 2.1.2
+  esp-idf-lib/mcp4725:
+    component_hash: 316114ca50fdae337670b7153deea13a5f4143caf3d2f69535c82745205419e1
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: esp-idf-lib/i2cdev
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.0.7
   espressif/arduino-foc:
     component_hash: 9fb94126efc8fbaf578b59ca9cec957df9a5e2a32af834c535c99f3858552af7
     dependencies:
@@ -120,14 +186,16 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.3
+    version: 5.5.5
 direct_dependencies:
+- esp-idf-lib/i2cdev
+- esp-idf-lib/mcp4725
 - espressif/button
 - espressif/esp_simplefoc
 - espressif/led_indicator
 - espressif/led_strip
 - espressif/mdns
 - idf
-manifest_hash: c43d29fcd396759b4b364457bb615f5029a8e7ffdb4c81f8701ec4fe09d184c7
+manifest_hash: 910a512adb639834e285b1e46175b875f763585e64bed053bce5d454e0523aad
 target: esp32c6
 version: 2.0.0
