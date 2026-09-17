@@ -7,7 +7,7 @@
 两个 ESP-IDF 工程 + 一份共享协议。**验收标准是 `idf.py build` 通过**——
 上板动作全部写成了自检命令，等板回来一次跑完。
 
-```
+```text
 code/
 ├── components/
 │   ├── foc_link_protocol/          承载层：PA 帧格式（两端共用；**只搬字节**）
@@ -100,7 +100,7 @@ else:
 
 **平台层 `components/focstep_platform/` 不含任何应用语义**，换项目整个目录拷走即可。
 
-| | 内容 | 行数 |
+|  | 内容 | 行数 |
 | --- | --- | --- |
 | **平台层** | `board_pins` / `kth5701` / `ipropi_*` / `bus_voltage` / `foc_motor` / `homing` / `power_state` / `wakeup` / `led_ws2812` / `platform_button` / `can_link` / `net_ota` / `platform_events` / `platform_console` | 4848 |
 | **应用层** | `app_main.c` / `app_door.c` / `app_console.c` | 614 |
@@ -352,7 +352,7 @@ source to drain, the value of ILSx for that channel is **zero**"*
 
 ### 判据：两条并行，任一成立即判接触
 
-```
+```text
 ① 电流相对基线的抬升   peak > baseline × HOME_RISE_PCT   ← 早期检测, 接触瞬间即响应
 ② 位置停滞             位移 < 2 mrad                      ← 保底, 电流不可用时仍工作
    任一满足并持续 HOME_CONFIRM_MS ⇒ 判定接触
@@ -426,7 +426,7 @@ DIAG 拉高。**本质是反电动势测量。**
 | --- | --- | --- |
 | `learn both [pos\|neg]` | 顶限位标两端，带**两次逼近 + 重复性检查**。只给零点方向 | 首次装机 / 换电机 / 换机构 |
 | `home <方向>` → `learn zero` / `learn end` | 单端重标两步：`home` 只**测**（不动行程），`learn zero\|end` 只**写**（不动电机），**另一端的物理位置保持不变**（span 按新端点重算） | 只有一端够得着 / 只有一端动过 |
-| `mark zero` / `mark end` | **把当前位置定为端点**，不推限位（要求电机静止）| 手推到机械端点后免拆卸重标；或限位够不着时 |
+| `mark zero` / `mark end` | **把当前位置定为端点**，不推限位（要求电机静止） | 手推到机械端点后免拆卸重标；或限位够不着时 |
 | `learn auto [on\|off]` | 无人值守自动标定：受**策略门控**（`auto_calib` 默认关，Kconfig `FOCSTEP_HOME_AUTO_ENABLE`），方向也来自策略（`FOCSTEP_HOME_AUTO_INVERTED`，因为无人值守时"哪侧是零点"推不出来），失败**按 `FOCSTEP_HOME_RETRY` 重试**并报 `PS_FAULT_CALIB` | 上电自学习（待接：目前只能手动触发） |
 | `pos` / `status` | 看行程三态与位置可信度 | 每次开工先看一眼 |
 
@@ -541,7 +541,7 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 
 板级"深睡"（`power_state = PS_SLEEP`）有两种 MCU 实现，**Kconfig 二选一**：
 
-| | `FOCSTEP_SLEEP_MODE_DEEP`（默认） | `FOCSTEP_SLEEP_MODE_LIGHT` |
+|  | `FOCSTEP_SLEEP_MODE_DEEP`（默认） | `FOCSTEP_SLEEP_MODE_LIGHT` |
 | --- | --- | --- |
 | 唤醒 | **即复位** ⇒ 从 `app_main` 重跑 | **不复位** ⇒ 从 `esp_light_sleep_start()` 之后继续 |
 | 位置 | 睡前写 NVS（`foc_motor_save_position`），醒来 `restore_position` 做一致性检查 | 只记 RAM（`mark_sleep_angle`），醒来 `check_sleep_angle` 用**同一套判据** |
@@ -653,13 +653,13 @@ Android app，**只取协议规格（命令字/帧格式/寄存器访问时序�
 
 | # | 项 | 判据 |
 | --- | --- | --- |
-| 1 | 晶振真在跑 | 启动日志**不得**出现 `32.768kHz XTAL not detected`；`grep CONFIG_RTC_CLK_SRC_EXT_CRYS sdkconfig` 确认符号生效（写错会被 Kconfig **静默忽略**）|
+| 1 | 晶振真在跑 | 启动日志**不得**出现 `32.768kHz XTAL not detected`；`grep CONFIG_RTC_CLK_SRC_EXT_CRYS sdkconfig` 确认符号生效（写错会被 Kconfig **静默忽略**） |
 | 2 | 同步 | `wl pa` → 日志 `已同步: per_adv_ival≈240ms`，`wl status` 的 T 实得 ≈480ms |
 | 3 | 指令链 | 先用 `pa_send open` 验"事件→应用"（不经射频），再用发送端真发 |
 | 4 | 重复帧幂等 | 发送端一条指令重复 5 次 → 接收端 `重复帧` 计数 +4，且**只执行一次** |
 | 5 | 改 T | 发送端 `t 3000` → 接收端日志 terminate→create，T 实得=3120ms |
 | 6 | 功耗三点 | 同会话差值口径：`wl off` / 480ms / 3120ms → 拟合 `f + 0.16/T` 得**本板真实 f** |
-| 7 | 监听期真睡着 | `CONFIG_PM_PROFILING=y` 看 light sleep 占比应 >95%（低了就是有任务在轮询）|
+| 7 | 监听期真睡着 | `CONFIG_PM_PROFILING=y` 看 light sleep 占比应 >95%（低了就是有任务在轮询） |
 | 8 | 本地唤醒 | 监听期手拉 → ≤`PA_TICK_MS` 内进接管，且**没有反复唤醒** |
 | 9 | 失步恢复 | 发送端断电 → `失步` 计数增加并重扫，电流回落 |
 | 10 | 体积 | `idf.py size`：BLE 加入后仍要装进 `TWO_OTA_LARGE` |

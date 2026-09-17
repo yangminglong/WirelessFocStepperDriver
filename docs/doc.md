@@ -111,7 +111,7 @@
 > 抬高输出至3.35~3.4V：补偿磁珠DCR压降（ESP32 TX峰值382mA ×0.1Ω≈40mV），模组端稳压落在标称3.3V附近，上限3.47V <3.6V最大额定。
 
 ### 2.1 电源树
-```
+```text
 DC输入18~25.2V → **无入口电容/阻尼支路**，直接进 Buck 与 DRV8874 母线
 ├─ TPP363070 → 3.3V骨干轨（3.35~3.4V）
 │  ├─磁珠 +22µF +0.1µF → ESP32-C6-MINI
@@ -408,7 +408,7 @@ VM母线经**高边P-MOS门控**（GPIO7控制）→ **100k+8.2k 1%** 分压 →
 
 **恒流下沉把"比例关系"换成了"固定压降"**：
 
-```
+```text
 I    = (V_GPIO − Vbe) / R2 = (3.3 − 0.7) / 33k = 79µA      ← 与 VM 无关
 Vgs  = −I × R1 = −79µA × 100k = −7.9V                       ← 与 VM 无关
 ```
@@ -734,7 +734,7 @@ DRV8874 VREF 由 **MCP4725（U8，12-bit I2C DAC）** 直接驱动——**ITRIP 
 > ⚠️ 纪律：`power_state.c` 是 GPIO18 与 **DAC PD 命令**的唯一编排方（§10.3）——睡眠 `nSLEEP=0 → DAC PD`，唤醒 `DAC 输出 → nSLEEP=1`，顺序不可颠倒；自检命令之外的任何模块不得碰。
 
 **参数计算**
-```
+```text
 IPROPI(µA) = 负载电流(A) × A_IPROPI(µA/A)     A_IPROPI Typ = 450 µA/A
 V_IPROPI(V) = IPROPI × R_IPROPI
 ITRIP(A)    = V_VREF / (R_IPROPI × A_IPROPI)
