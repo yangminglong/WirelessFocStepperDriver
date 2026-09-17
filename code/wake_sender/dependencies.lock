@@ -2,11 +2,11 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.3
+    version: 5.5.5
   nimble_peripheral_utils:
     dependencies: []
     source:
-      path: /home/hanson/.espressif/v5.5.3/esp-idf/examples/bluetooth/nimble/common/nimble_peripheral_utils
+      path: Q:\espressif\.espressif\v5.5.5\esp-idf\examples\bluetooth\nimble\common\nimble_peripheral_utils
       type: local
     version: '*'
 direct_dependencies:

@@ -27,13 +27,13 @@ code/
 ### Linux
 
 ```bash
-export IDF_PATH=/home/hanson/.espressif/v5.5.3/esp-idf
+export IDF_PATH=/home/hanson/.espressif/v5.5.5/esp-idf
 export IDF_TOOLS_PATH=/home/hanson/.espressif/tools
 export ESP_ROM_ELF_DIR=/home/hanson/.espressif/tools/esp-rom-elfs/20241011
-export IDF_PYTHON_ENV_PATH=/home/hanson/.espressif/tools/python/v5.5.3/venv
+export IDF_PYTHON_ENV_PATH=/home/hanson/.espressif/tools/python/v5.5.5/venv
 export PATH="/home/hanson/.espressif/tools/ninja/1.12.1:\
-/home/hanson/.espressif/tools/riscv32-esp-elf/esp-14.2.0_20251107/riscv32-esp-elf/bin:\
-/home/hanson/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin:\
+/home/hanson/.espressif/tools/riscv32-esp-elf/esp-14.2.0_20260121/riscv32-esp-elf/bin:\
+/home/hanson/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin:\
 $IDF_PYTHON_ENV_PATH/bin:$PATH"
 
 for p in driver wake_sender; do
@@ -41,8 +41,10 @@ for p in driver wake_sender; do
 done
 ```
 
-> ⚠️ `~/.espressif/tools/activate_idf_v5.5.3.sh` 把 `idf.py` 定义成 **shell alias**，
+> ⚠️ `~/.espressif/tools/activate_idf_v5.5.5.sh` 把 `idf.py` 定义成 **shell alias**，
 > 非交互 shell（脚本/CI）里不生效，必须用上面的显式方式。
+>
+> ⚠️ **两端必须同版本**：`dependencies.lock` 记的是 IDF 5.5.5，用别的版本编会报 mismatch。
 
 ### Windows（eim 装的 IDF，在 Git Bash 里）
 
