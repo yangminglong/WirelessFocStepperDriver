@@ -168,6 +168,11 @@ esp_err_t ipropi_read_both_ma(float *ma1, float *ma2)
         return (r1 != ESP_OK) ? r1 : r2;
     }
     float denom = (float)CFG_A_IPROPI * (float)CFG_R_IPROPI_OHM;
+    /* 与 ipropi_read_ma 同一条守卫: Kconfig 的两个系数都没有 range 下限,
+     * 配成 0 就是除零 (IEEE 下会算出 inf 并被打印成电流值)。 */
+    if (denom <= 0.0f) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (ma1) {
         *ma1 = (float)mv1 * 1e6f / denom;
     }

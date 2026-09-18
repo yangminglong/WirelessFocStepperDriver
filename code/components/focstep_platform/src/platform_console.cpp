@@ -240,9 +240,16 @@ static int do_vref(int argc, char **argv)
         printf("用法: vref <档位A>   例: vref 1.5 → VREF≈2.35V; vref 0 → 0V 并进 PD\n");
         return 1;
     }
-    float a = atof(argv[1]);
     /* ⚠️ 自检命令: 直接操作 DAC (power_state 之外的唯一例外, doc.md §5.4 纪律)。
-     *    正常运行期 DAC 输出/PD 由 power_state.c 编排。 */
+     *    正常运行期 DAC 输出/PD 由 power_state.c 编排 —— 正因为如此, 门带电运行时
+     *    这条命令会把 VREF 改成一个 power_state 不知道的值: `vref 0` 会让两片 DRV
+     *    的 ITRIP 当场变 0, 门在半途失去全部力矩并可能自由滑落。ACTIVE 态直接拒绝。 */
+    if (power_state_current() == PS_ACTIVE) {
+        printf("拒绝: 门正处于带电运行态 ⇒ 请先 stop / 等它回空闲或睡眠再自检。\n");
+        printf("      (带电改 VREF 会让限流与 power_state 的编排脱节)\n");
+        return 1;
+    }
+    float a = atof(argv[1]);
     if (a <= 0.0f) {
         esp_err_t r1 = vref_dac_set(0.0f);
         esp_err_t r2 = vref_dac_pd();
@@ -320,8 +327,14 @@ static int do_ipropi(int argc, char **argv)
     printf("换算: A_IPROPI=%d µA/A, R_IPROPI=%d Ω (均在 Kconfig)\n",
            CONFIG_FOCSTEP_A_IPROPI_UA_PER_A, CONFIG_FOCSTEP_R_IPROPI_OHM);
     printf("⚠️ 手册正文写 450、应用示例写 455 µA/A —— 用已知负载比对后按实测回填。\n");
-    printf("⚠️ V_IPROPI 被内部钳位到 V_VREF ⇒ 可测上限 ≈ %.2f A, 再高读数不再上升。\n",
-           (double)(2.35f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
+    /* 可测上限就是当前 VREF 档位本身: IPROPI 引脚电压 = I × (R×A), 被 DRV 内部
+     * 钳在 V_VREF 上, 所以 I_max = V_VREF / (R×A) = ITRIP。别在这里另算一遍。 */
+    if (vref_dac_itrip_a() <= 0.0f) {
+        printf("⚠️ DAC 当前在 PD (VREF=0) ⇒ 可测上限 0, 先 `vref <档位A>` 再读。\n");
+    } else {
+        printf("⚠️ V_IPROPI 被内部钳位到 V_VREF ⇒ 可测上限 ≈ %.2f A, 再高读数不再上升。\n",
+               (double)vref_dac_itrip_a());
+    }
     return 0;
 }
 
@@ -761,7 +774,7 @@ static int do_stall(int argc, char **argv)
     printf("阈值     : %d mA (矢量幅值峰值), 持续 %d ms\n",
            CONFIG_FOCSTEP_STALL_CURRENT_MA, CONFIG_FOCSTEP_STALL_MS);
     printf("实测上限 : ≈%.2f A (V_IPROPI 被钳位到 V_VREF, 再高读数不再上升)\n",
-           (double)(2.35f / (CONFIG_FOCSTEP_R_IPROPI_OHM * 450e-6f)));
+           (double)vref_dac_itrip_a());
     printf("\n用法: stall | stall reset\n");
     printf("整定: 跑 normal 负载, 用 `ipropi` 反复读, 记录稳态峰值, 取其 1.5~2 倍。\n");
     return 0;

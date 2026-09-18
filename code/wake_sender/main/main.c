@@ -274,10 +274,22 @@ static void dispatch_tick(void)
 
 /* 自动策略: 运动 → T_ACTIVE; 静止 hold 时间 → T_IDLE。
  * 手动 `t <ms>` 会关掉自动 (`t auto` 恢复)。 */
-static void policy_apply_t(uint32_t t_ms, const char *why)
+static bool policy_apply_t(uint32_t t_ms, const char *why)
 {
+    /* T 走协议里的 16 位参数域 ⇒ 上限就是 65535 ms。
+     * ⚠️ 不能靠 (uint16_t) 截断: 70000 会静默变成 4464, 接收端照单全收,
+     *    唤醒周期直接差 15 倍, 而两端日志都看不出异常。 */
+    if (t_ms == 0) {
+        ESP_LOGW(TAG, "T=0 无效 (接收端会回落到 Kconfig 默认值), 已忽略");
+        return false;
+    }
+    if (t_ms > 0xFFFFu) {
+        ESP_LOGW(TAG, "T=%u ms 超出协议字段 (最大 65535), 已忽略", (unsigned)t_ms);
+        return false;
+    }
     ESP_LOGI(TAG, "T → %u ms (%s)", (unsigned)t_ms, why);
     request_command(FOC_DOOR_CMD_SET_T, (uint16_t)t_ms);
+    return true;
 }
 
 static void policy_on_motion(void)
@@ -383,8 +395,12 @@ static int cmd_t(int argc, char **argv)
     }
     if (argc > 1) {
         uint32_t ms = (uint32_t)strtoul(argv[1], NULL, 10);
+        /* 先确认值被接纳再切"手动": 否则一个打错的 T 会白白关掉自动策略 */
+        if (!policy_apply_t(ms, "手动")) {
+            printf("未生效: T 的合法范围是 1~65535 ms\n");
+            return 1;
+        }
         s_t_auto = false;
-        policy_apply_t(ms, "手动");
         printf("T 策略 → 手动 (t auto 恢复自动)\n");
         return 0;
     }

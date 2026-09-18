@@ -44,14 +44,18 @@ CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y
 # 保留 RTC 域, 深睡时给 flash 掉电。
 CONFIG_ESP_SLEEP_POWER_DOWN_FLASH=y
 
-# ---- I2C: 必须用**旧版** i2c 驱动 ----
-# 两个理由:
-#  ① i2c_bus 默认(BACKWARD_CONFIG=n)会自带一份 i2c_config_t, 与 driver/i2c.h 冲突,
-#     而 esp_simplefoc 的 AS5600 与本工程的 KTH5701 都按旧版结构体写 (.master.clk_speed)。
-#  ② KTH5701 需要"写 N 字节 → STOP → 独立读"的事务结构 (参考实现用
-#     Linux 的两段独立事务), 只有旧版命令链 (i2c_cmd_link_create / i2c_bus_cmd_begin)
-#     才能精确控制。
+# ---- I2C ----
+# ① i2c_bus 是 esp_simplefoc 传递拉进来的 (AS5600 支持), 它按**旧版** i2c_config_t
+#    结构体写 (.master.clk_speed); 不开 BACKWARD_CONFIG 时 i2c_bus 会自带另一份
+#    i2c_config_t, 与 driver/i2c.h 冲突。
+#    ⚠️ 本工程的编码器与 DAC **都不走 i2c_bus**: 两者统一由 esp-idf-lib/i2cdev 建在
+#       driver/i2c_master 之上 (见 components/focstep_platform/idf_component.yml)。
 CONFIG_I2C_BUS_BACKWARD_CONFIG=y
+
+# ② i2cdev 的每次事务自带 3 次重试 + 20/40/80ms 指数退避, 而单次超时默认 1000ms。
+#    编码器读跑在 1kHz 的 FOC 环里 ⇒ 总线被拉低时最坏要阻塞约 4.3s, 控制环直接停摆。
+#    压到区间下限 10ms (400kHz 下 3 字节事务远远够用) 后最坏停顿降到百毫秒量级。
+CONFIG_I2CDEV_TIMEOUT=10
 
 # ---- ADC ----
 # IPROPI 在 1.5A 时约 2.36V, 必须 12dB 档 (0dB 量程只有 ~1.1V)。

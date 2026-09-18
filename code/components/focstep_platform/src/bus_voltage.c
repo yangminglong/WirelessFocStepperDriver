@@ -111,8 +111,12 @@ esp_err_t bus_voltage_read_mv(int *mv)
     int raw = 0;
     ret = adc_oneshot_read(s_adc, ADC_CHANNEL_2, &raw);
 
-    /* 无论采样成功与否都要关断门控 —— 否则会常态耗电 */
-    bus_voltage_gate(false);
+    /* 无论采样成功与否都要关断门控 —— 否则门控会常导通, 常态耗 312µA,
+     * 正是上面那段注释警告的失效模式。失败必须说出来, 不能吞。 */
+    esp_err_t grel = bus_voltage_gate(false);
+    if (grel != ESP_OK) {
+        ESP_LOGE(TAG, "门控关断失败 (%s): 会常态耗 312µA", esp_err_to_name(grel));
+    }
 
     if (ret != ESP_OK) {
         return ret;

@@ -44,6 +44,8 @@ static bool pa_payload_filter(uint8_t cmd, uint16_t arg)
 /* 无线监听窗口 (出厂行为: 上电开窗, 无活动则自动关闭回 µA 档)。
  * 见 code/README.md §13 —— 窗口计时器归应用, 平台只管射频。 */
 static TickType_t s_pa_hold_since = 0;
+/* 上一次 tick 看到的射频模式, 用来捕捉"进入 PA 监听"这个边沿 */
+static pa_wake_mode_t s_pa_mode_prev = PA_WAKE_OFF;
 
 /* 有"活动"就重新计时。活动 = 远程指令 / 本地唤醒 / 按键 / CAN / 命令台。
  * ⚠️ 发送端**心跳不算活动** (否则窗口永不回落) —— 心跳在平台层就被丢掉了。 */
@@ -206,7 +208,14 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const focstep_evt_wake_t *e = (const focstep_evt_wake_t *)data;
         if (e->src == WAKE_SRC_ENCODER_INT) {
             ESP_LOGI(TAG, "手拉唤醒 → 唤醒接管");
-            pa_hold_reset("本地手拉"); /* 有人在场 → 重开一个可远程达的窗口 */
+            pa_hold_reset("本地手拉");
+            /* 有人在场 ⇒ 往往也要远程可达: 把监听重新打开 (出厂行为)。
+             * 窗口的重新计时不在这里做 —— tick 的"进入 PA"边沿统一负责。 */
+#if CONFIG_FOCSTEP_PA_WAKE_ENABLE
+            if (pa_wake_set_mode(PA_WAKE_PA) != ESP_OK) {
+                ESP_LOGW(TAG, "重开无线监听失败 (未编入或 BT 未启); 本地功能不受影响");
+            }
+#endif
             power_state_request(PS_ACTIVE);
             set_mode(APP_MODE_ASSIST);
         }
@@ -323,9 +332,18 @@ void app_door_tick(void)
 {
     TickType_t now = xTaskGetTickCount();
 
+    /* 窗口从"射频进入 PA 监听"这一刻起算 —— 不管是上电、命令台 `wl pa` 还是本地
+     * 唤醒打开的, 三条开启路径共用这一个边沿, 开启点各自不必记得重置计时器
+     * (它们够不着这里的 static 状态)。 */
+    pa_wake_mode_t pm = pa_wake_mode();
+    if (pm == PA_WAKE_PA && s_pa_mode_prev != PA_WAKE_PA) {
+        pa_hold_reset("监听开启");
+    }
+    s_pa_mode_prev = pm;
+
     /* 无线监听窗口到期 → 关监听回落 µA 档 (出厂行为, 见 code/README.md §13)。
      * 落回深睡后只有本地唤醒能叫醒; 本地一被叫醒, 窗口会重新打开。 */
-    if (pa_wake_mode() == PA_WAKE_PA &&
+    if (pm == PA_WAKE_PA &&
         (now - s_pa_hold_since) > pdMS_TO_TICKS(CONFIG_FOCSTEP_PA_LISTEN_HOLD_MS)) {
         ESP_LOGI(TAG, "无线监听窗口到期 (%d ms 无活动), 关监听回深睡",
                  CONFIG_FOCSTEP_PA_LISTEN_HOLD_MS);
@@ -408,9 +426,8 @@ esp_err_t app_door_init(void)
     pa_wake_set_payload_filter(pa_payload_filter);
 
 #if CONFIG_FOCSTEP_PA_BOOT_LISTEN
-    /* 出厂行为: 上电就开一个无线监听窗口 (超时回落由 tick 负责)。
+    /* 出厂行为: 上电就开一个无线监听窗口 (窗口计时与超时回落都由 tick 负责)。
      * ⚠️ 这不是 §六 的深睡档: 监听期是**另一档功耗** (亚 mA, 按 T 分档), 见 doc §六。 */
-    pa_hold_reset(NULL);
     if (pa_wake_set_mode(PA_WAKE_PA) != ESP_OK) {
         ESP_LOGW(TAG, "无线监听开启失败 (未编入或 BT 未启); 本地功能不受影响");
     }

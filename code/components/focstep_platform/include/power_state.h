@@ -12,7 +12,7 @@
  * ★★ 为什么 `nSLEEP` 是本模块的**唯一职责核心** —— 这一根脚上挂着 **DRV 断电与
  *
  *  1. **VREF 由 MCP4725 (DAC) 动态驱动** (docs/doc.md §五.4)。DRV8874 的 VREF 是
- *     12-bit DAC 输出 (I2C 0x60), 待机进 **PD (PD1:PD0=01, 内部 100k 下拉)**: VREF=0,
+ *     12-bit DAC 输出 (I2C 0x60), 待机进 **PD (PD1:PD0=10, 内部 100k 下拉)**: VREF=0,
  *     60nA typ / 2µA max (等效 ≈0)。**⇒ 睡眠/故障必须先 nSLEEP=0 再发 DAC PD;
  *     唤醒先 DAC 输出目标 VREF → 稳定 → 再抬 nSLEEP (§5.4 顺序不可颠倒)。**
  *     ⚠️ 若睡眠态漏掉 DAC PD, 正常模式 210µA 常挂 3.4V 轨, 待机预算当场破。

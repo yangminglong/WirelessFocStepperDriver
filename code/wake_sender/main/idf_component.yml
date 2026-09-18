@@ -1,5 +1,7 @@
 dependencies:
   idf: ">=5.0"
-  # 周期广播示例的公共部分 (ble_hs 初始化等)
-  nimble_peripheral_utils:
-    path: ${IDF_PATH}/examples/bluetooth/nimble/common/nimble_peripheral_utils
+  # 除 IDF 内置组件外无其它托管依赖; 共享协议组件 (foc_link_protocol / foc_door_link)
+  # 由 CMakeLists.txt 的 EXTRA_COMPONENT_DIRS 从 ../components 引入, 不走这里。
+  # ⚠️ 不要引入指向 IDF 安装目录的**本地路径**依赖 (如 ${IDF_PATH}/examples/...):
+  #    组件管理器会把解析后的绝对路径写进 dependencies.lock, 而锁文件是要入库的
+  #    ⇒ 换一台机器构建就解析不到, 且每台机器都会把锁文件改脏。

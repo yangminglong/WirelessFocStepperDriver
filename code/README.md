@@ -135,12 +135,14 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 
 **原则：设计一个功能之前，先查组件仓库有没有现成的。** 只有确认没有才自己写。
 
-已核实的仓库现状（2026-09-14）：
+已核实的仓库现状（2026-09-18）：
 
 | 功能 | 组件 | 说明 |
 | --- | --- | --- |
 | FOC 电机控制 | **`espressif/esp_simplefoc` 1.4.1** | 传递拉入 `arduino-foc`(SimpleFOC v2.4.0 移植) + `iqmath` + `i2c_bus` |
-| I2C 总线 | **`espressif/i2c_bus` 1.5.2** | 由 esp_simplefoc 传递依赖，KTH5701 复用 |
+| **I2C 总线 / 器件** | **`espressif/i2c_bus` 1.5.2** | 由 esp_simplefoc 传递依赖（给它的 AS5600 路径用）。**本工程的编码器与 DAC 不经过它** |
+| **I2C 器件驱动** | **`esp-idf-lib/i2cdev`** | 建在 `driver/i2c_master` 之上，编码器（KTH5701）与 DAC（MCP4725）共用一条总线 —— 见 `components/focstep_platform/idf_component.yml` |
+| **DAC (VREF)** | **`esp-idf-lib/mcp4725`** | MCP4725 动态 VREF，见 `vref_dac.c` / doc.md §5.4 |
 | WS2812 底层 | **`espressif/led_strip` 3.0.3** | RMT 驱动 |
 | **灯效/闪灯模式** | **`espressif/led_indicator` 2.1.2** | 闪灯时序与模式表是它的本职 —— 不必自己写闪灯状态机 |
 | **按键消抖/事件** | **`espressif/button` 4.2.1** | 短按/双击/长按识别。GPIO9 **严禁加消抖电容**，所以消抖只能做在固件里，正是它的用途 |
@@ -174,7 +176,7 @@ platform_console_register("open", "开门", my_open_cb);      // 追加自己的
 | LP 域 GPIO0~7 | **已用满，无空闲 GPIO**。新增功能只能复用既有信号 |
 | ADC1 | GPIO0~6 七路，扣掉晶振后实际 5 路，本项目用满 3 路（GPIO2 母线 + GPIO4/5 IPROPI） |
 | Strapping | GPIO8 **严禁加下拉**（与 GPIO9 同为 0 是非法 boot 组合） |
-| JTAG | GPIO4~7 被 IPROPI/PMODE/门控占用 ⇒ **外部 JTAG 不可用**，只能走 USB-Serial-JTAG |
+| JTAG | GPIO4~7 是 RISC-V JTAG 复用脚，而本板把它们分给了 ADC（IPROPI GPIO4/5）、WS2812 DIN（GPIO6）、母线门控（GPIO7）⇒ **外部 JTAG 不可用**，只能走 USB-Serial-JTAG |
 
 ---
 
@@ -244,7 +246,7 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 | 5 | `vbus` | 母线电压，与万用表比对 | 差得多就查分压比/门控 |
 | 6 | `gate 0` | 门控关断后 ADC 节点应为 **0V** | 若为 24V ⇒ 门控做在低边了 |
 | 7 | `brake` | **两相 EN 拉低 = Brake**，手转有阻尼、电机不主动转 | 见 §5.1 |
-| 8 | `vref 1.5` / `vref 0` | **VREF 引脚 ≈2.35V / 0V（0 档并进 PD）** | 0V 后总电流不回落 ⇒ DAC PD 没生效，**待机预算当场破** |
+| 8 | `vref 1.5` / `vref 0` | **VREF 引脚 ≈2.35V / 0V（0 档并进 PD）**；换算按 `FOCSTEP_ITRIP_MA` / `R_IPROPI` / `A_IPROPI` 现算 | 0V 后总电流不回落 ⇒ DAC PD 没生效，**待机预算当场破**。⚠️ 门处于带电运行态时本命令会拒绝执行 |
 | 9 | `jog 1.0` | 小电压点动，确认转向与 atan2 方向一致 | 反了就改 `FOCSTEP_ENCODER_DIRECTION` |
 | 10 | `align` | initFOC 电角对齐（**门要松开**） | — |
 | 11 | `char 2.0` | 实测相电阻 → **回填 Kconfig `FOCSTEP_PHASE_RESISTANCE`** | — |

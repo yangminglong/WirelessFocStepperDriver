@@ -225,10 +225,16 @@ menu "FocStepper 平台层"
             int "设计斩波阈值 ITRIP (mA)"
             default 1500
             help
-                由 MCP4725 动态 VREF 与 R_IPROPI 共同决定 (VREF = ITRIP × 1.566 V/A,
-                R_IPROPI=3.48k)。doc.md §5.4 档位表: 0.3A→0.47V / 1.0A→1.57V /
-                1.5A→2.35V / 1.8A→2.82V; VREF≥3.0V 后 DRV 内部钳位 (封顶 1.915A),
-                固件 clamp ≤1.85A。仅用于换算与自检提示; 实际输出走 vref_dac.c。
+                **这是 ITRIP 的唯一真源**: 固件按本值算出 MCP4725 该输出多少伏
+                (VREF = ITRIP × R_IPROPI × A_IPROPI) —— 唤醒接管档、运行档、
+                自检提示的"可测上限"全部由它推导, 代码里不另存一份档位常量。
+                doc.md §5.4 档位表: 0.3A→0.47V / 1.0A→1.57V / 1.5A→2.35V /
+                1.8A→2.82V; VREF≥3.0V 后 DRV 内部钳位 (封顶 1.915A),
+                固件 clamp ≤1.85A。
+
+                ⚠️ 本值同时就是 IPROPI 的**可测上限** (引脚被 DRV 钳在 V_VREF 上)
+                ⇒ FOCSTEP_STALL_CURRENT_MA 与 FOCSTEP_CURRENT_LIMIT 都必须 ≤ 本值,
+                否则它们要求的电流驱动板永远给不出。
 
         config FOCSTEP_STALL_CURRENT_MA
             int "堵转判定电流 (mA, 矢量幅值)"
@@ -241,7 +247,7 @@ menu "FocStepper 平台层"
                 0.707·I ~ I 之间摆动, 拿去比阈值会让"持续时间"条件永远凑不满,
                 一次都触发不了。
 
-                ⚠️ 因为 VIPROPI 被钳位到 V_VREF, **实测上限约 1.494A** (VREF=2.35V 档),
+                ⚠️ 因为 VIPROPI 被钳位到 V_VREF, **可测上限就是 FOCSTEP_ITRIP_MA**,
                 不再上升 ⇒ 只能判"到顶", 不能测幅值。故本值**必须 < ITRIP**。
                 整定方法: 先跑 normal 负载记录稳态峰值, 取其 1.5~2 倍。
 
@@ -395,7 +401,7 @@ menu "FocStepper 平台层"
 
         config FOCSTEP_VBUS_GATE_SETTLE_US
             int "门控导通后等待 (µs)"
-            range 20 5000
+            range 62 5000
             default 70
             help
                 **拓扑 (doc.md §5.1)**: GPIO7 → 恒流下沉 (Q3 MMBT5551 + Re 33k)
@@ -437,14 +443,10 @@ menu "FocStepper 平台层"
                 - 下界: USB 单独供电 VM≈4.6V (逼近 DRV8874 下限 4.5V) ⇒ 必须挡
                 - 上界: 2S 锂电放电截止恰好 **6.0V** ⇒ 不能高过它
                 - 取 **5400**: 距 USB 有 0.8V 余量, 距 2S 截止有 0.6V 余量
-                ⚠️ 原值 6000 与 2S 截止重合 ⇒ 满放时电机被禁, 且**对 ADC 误差
+                ⚠️ 取 6000 会与 2S 截止重合 ⇒ 满放时电机被禁, 且**对 ADC 误差
                 零余量** (低压端折算误差 ±0.06~0.13V 就能把 6.0V 判成"空")。
                 ⚠️ 低压端 ADC 节点 0.35~0.46V 是 ESP32 ADC **相对精度最差**的
                 区域, 本阈值仍须与实测精度一起复核 (doc.md §9.2 #24)。
-
-        config FOCSTEP_VBUS_OVERVOLT_MV
-            int "过压上报阈值 (mV)"
-            default 30000
 
     endmenu
 
@@ -509,14 +511,11 @@ menu "FocStepper 平台层"
         config FOCSTEP_WS2812_ENABLE
             bool "启用 WS2812"
             default y
-
-        config FOCSTEP_WS2812_BRIGHTNESS
-            int "亮度 (0~255)"
-            range 0 255
-            default 32
             help
+                亮度**不在 Kconfig**: led_indicator 对 RGB 步没有全局亮度缩放
+                (每次 RGB 步都会整体覆盖内部的 IHSV 值), 唯一生效的限幅是
+                led_ws2812.c 里那几个小数值的 RGB 宏。
                 ⚠️ **禁全白**: 单颗全白约 60mA, 会瞬间拉垮 Buck。
-                默认 32 已足够看清。
 
     endmenu
 

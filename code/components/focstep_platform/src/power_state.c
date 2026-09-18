@@ -87,7 +87,12 @@ static void enter_state(power_state_t st)
          *    VREF 走 MCP4725: 先断电再发 DAC PD (VREF=0, 60nA) —— §5.4 顺序不可颠倒。 */
         foc_motor_stop();
         nsleep_set(false);
-        vref_dac_pd();
+        /* PD 失败不阻断睡眠 (电机已断电, 安全方向), 但必须说出来 ——
+         * 漏掉 PD 意味着正常模式 210µA 常挂 3.4V 轨, 待机预算当场破,
+         * 而这件事只有万用表看得见, 日志是唯一的线索。 */
+        if (vref_dac_pd() != ESP_OK) {
+            ESP_LOGW(TAG, "DAC PD 未确认: 待机电流会多约 210µA (正常模式)");
+        }
         foc_motor_encoder_set_mode(ENC_CMD_WAKEUP_SLEEP);
 #if CONFIG_FOCSTEP_SLEEP_MODE_LIGHT || CONFIG_FOCSTEP_PA_WAKE_ENABLE
         /* 需要"系统能真正 idle"的两档都要暂停 FOC 任务:
@@ -106,10 +111,30 @@ static void enter_state(power_state_t st)
 #endif
         /* 编码器先切连续档 (否则读不到角度); VREF 先输出目标档再抬 nSLEEP (§5.4 顺序) */
         foc_motor_encoder_set_mode(ENC_CMD_CONTINUOUS);
+
+        /* VREF 写不进去就**不使能电机**。留在 PD/0V 时 DRV 的斩波阈值也是 0:
+         * 桥给不出任何力矩, 而 IPROPI 恒读 0 会让堵转与力矩判据一起失灵 ——
+         * 现场表现为"指令收下了、门不动", 比直接不给使能难查得多。 */
         esp_err_t vret = vref_dac_set_default();
         if (vret != ESP_OK) {
-            ESP_LOGW(TAG, "DAC 输出失败: 保持上次 VREF (100k 兜底 → 限流最小, 安全)");
+            ESP_LOGE(TAG, "DAC 输出失败 (%s): 拒绝使能电机", esp_err_to_name(vret));
+            enter_state(PS_SLEEP);
+            return;
         }
+
+        /* §10.4 ①: 母线下限之下禁止使能电机。这条前置门必须挡在 nsleep_set(true)
+         * 之前 —— 周期 tick 里那条是**事后**兜底, 它放行的是"已经带电"的那一拍。
+         * 读失败/读数为 0 不算"低于阈值", 与 tick 的口径保持一致。 */
+        int mv = 0;
+        if (bus_voltage_read_mv(&mv) == ESP_OK && mv > 0 &&
+            !bus_voltage_allow_motor_enable(mv)) {
+            ESP_LOGW(TAG, "VBUS %d mV < %d mV: 拒绝使能电机",
+                     mv, CONFIG_FOCSTEP_VBUS_MIN_ENABLE_MV);
+            s_fault_code = PS_FAULT_VBUS_LOW;
+            enter_state(PS_FAULT);
+            return;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(2)); /* DAC 输出建立余量 */
         nsleep_set(true);
         /* ★ 唤醒后先切 brake 泄放反灌能量, 再读角度 (§10.3 硬性行为)。
@@ -123,7 +148,9 @@ static void enter_state(power_state_t st)
         /* 硬件故障: 电机必须断电。ISR 已先拉低 nSLEEP (立即), 此处补 DAC PD (I2C 只能在任务上下文) */
         foc_motor_stop();
         nsleep_set(false);
-        vref_dac_pd();
+        if (vref_dac_pd() != ESP_OK) {
+            ESP_LOGW(TAG, "DAC PD 未确认: 待机电流会多约 210µA (正常模式)");
+        }
         s_fault_since = xTaskGetTickCount();
         break;
     }

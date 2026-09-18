@@ -13,6 +13,14 @@
 
 static const char *TAG = "CAN";
 
+/* ⚠️ "CAN 档"与"控制台走 USB-Serial-JTAG"是**配套**的 (Kconfig 的
+ *    FOCSTEP_CAN_ENABLE 说明 / doc.md §5.3): 打开 CAN 时 TWAI 占用 GPIO16/17,
+ *    而 UART0 控制台默认也在同一对脚上 —— 只改一半的结果是"日志消失"或
+ *    "CAN 不通", 且现场没有任何报错线索。这里把这条纪律钉成构建期检查。 */
+#if CONFIG_FOCSTEP_CAN_ENABLE && !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#error "CAN 档必须同时把控制台改到 USB-Serial-JTAG: CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y、CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y、CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y。只开 FOCSTEP_CAN_ENABLE 会得到一个没有日志的板子。"
+#endif
+
 /* 自定义单帧协议: ID = base + cmd, 1 字节数据 = 0xA5 (防误触发) */
 #define CAN_DLC 1
 #define CAN_MAGIC 0xA5
@@ -104,7 +112,14 @@ static void ensure_started(void)
 
 void can_tick(void)
 {
-    if (!s_inited || !s_active) {
+    if (!s_inited) {
+        return;
+    }
+    /* 第一次 tick 才启 TWAI (上电到主循环之间用不上, 深睡档也不需要)。
+     * ensure_started() 是唯一调用 twai_start() 的地方, 必须在这里够得着 ——
+     * 否则 s_active 永远为 false, 整条 CAN 链路静默失效。 */
+    ensure_started();
+    if (!s_active) {
         return;
     }
 

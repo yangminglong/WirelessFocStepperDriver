@@ -29,6 +29,7 @@
 #include "platform_console.h"
 #include "platform_events.h"
 #include "power_state.h"
+#include "vref_dac.h"
 #include "wakeup.h"
 
 #include "esp_log.h"
@@ -67,7 +68,7 @@ void app_main(void)
     /* ---- 2. 平台外设, 顺序有讲究 ---- */
     /* 母线门控先关断: 保证上电到第一次采样之间不耗电, 也不往 ADC 节点灌电压 */
     ESP_ERROR_CHECK(bus_voltage_init());
-    /* 灯: 上电安全态 = 灭 (GPIO8 高, 同时满足 strapping) */
+    /* 灯: 上电安全态 = 灭 (显式发一帧全黑; 灯带常供电, 无供电门控) */
     ESP_ERROR_CHECK(led_init());
     /* 按键: 只发事件 */
     ESP_ERROR_CHECK(platform_button_init());
@@ -97,20 +98,26 @@ void app_main(void)
      * 则标记位置不可信 ⇒ 后续位置指令会被拒绝, 直到回零 (见 homing.c)。 */
     ESP_ERROR_CHECK(foc_motor_restore_position());
 
-    /* ---- 4. 电源状态机 (它一上来就把 nSLEEP 拉低) ---- */
+    /* ---- 4. DAC (MCP4725 动态 VREF) ----
+     * 位置有讲究: 必须在 foc_motor_init() 之后 (I2C 总线由编码器那边建起来),
+     * 且在 power_state_init() 之前 —— 那个模块假定上电时 DAC 已在 PD, 且它的
+     * GPIO18 编排全程依赖 vref_dac_* 可用。 */
+    ESP_ERROR_CHECK(vref_dac_init());
+
+    /* ---- 5. 电源状态机 (它一上来就把 nSLEEP 拉低) ---- */
     ESP_ERROR_CHECK(power_state_init());
 
-    /* ---- 5. 命令台: 平台先, 应用后 ---- */
+    /* ---- 6. 命令台: 平台先, 应用后 ---- */
     ESP_ERROR_CHECK(platform_console_init());
 #if CONFIG_FOCSTEP_CONSOLE_ENABLE
     app_console_init();
 #endif
 
-    /* ---- 6. FOC 任务 + 应用 ---- */
+    /* ---- 7. FOC 任务 + 应用 ---- */
     ESP_ERROR_CHECK(foc_motor_start_loop());
     ESP_ERROR_CHECK(app_door_init());
 
-    /* ---- 7. 平台态控制面 (默认关, 开着会打破深睡) ---- */
+    /* ---- 8. 平台态控制面 (默认关, 开着会打破深睡) ---- */
     esp_err_t net_ret = net_ota_start();
     if (net_ret == ESP_OK) {
         net_ota_print_info();
@@ -119,7 +126,7 @@ void app_main(void)
         ESP_LOGE(TAG, "控制面启动失败: %s (本地功能不受影响)", esp_err_to_name(net_ret));
     }
 
-    /* ---- 8. 唤醒原因 → 发事件, 由应用决定怎么做 ---- */
+    /* ---- 9. 唤醒原因 → 发事件, 由应用决定怎么做 ---- */
     wake_src_t src = wakeup_get_source();
     if (src != WAKE_SRC_NONE) {
         focstep_evt_wake_t e = {.base.timestamp_ms = platform_now_ms(), .src = (int)src};
@@ -199,7 +206,11 @@ void app_main(void)
 
             /* 灯带全黑必须**确认已锁存**再睡 —— led_set_color(OFF) 是异步的,
              * 见 led_off_and_wait() 注释 (§6.3 步骤 5)。 */
-            led_off_and_wait();
+            esp_err_t lret = led_off_and_wait();
+            if (lret != ESP_OK) {
+                ESP_LOGW(TAG, "灯带全黑未确认 (%s): 灯珠可能锁存上一颜色, "
+                              "睡眠期间约 60mA 且无硬件兜底", esp_err_to_name(lret));
+            }
 
             esp_deep_sleep_start();
             /* 不会返回 */
@@ -219,7 +230,11 @@ void app_main(void)
 
             /* 灯带全黑必须**确认已锁存**再睡 —— led_set_color(OFF) 是异步的,
              * 见 led_off_and_wait() 注释 (§6.3 步骤 5)。 */
-            led_off_and_wait();
+            esp_err_t lret = led_off_and_wait();
+            if (lret != ESP_OK) {
+                ESP_LOGW(TAG, "灯带全黑未确认 (%s): 灯珠可能锁存上一颜色, "
+                              "轻睡期间约 60mA 且无硬件兜底", esp_err_to_name(lret));
+            }
 
             /* 醒来先看 INT 电平再决定: KTH5701 的 INT 是**锁存**的 ⇒
              * "这次醒来是不是手拉"只看电平就够, 不依赖唤醒掩码
