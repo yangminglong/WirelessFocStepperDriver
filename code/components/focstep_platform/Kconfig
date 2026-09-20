@@ -197,15 +197,40 @@ menu "FocStepper 平台层"
 
     endmenu
 
+    menu "DAC (MCP4725 动态 VREF)"
+
+        config FOCSTEP_DAC_I2C_HZ
+            int "DAC 的 I2C 速率 (Hz)"
+            default 400000
+            help
+                U8 (MCP4725, 0x60) 与编码器共用一条总线 (GPIO14/15), 但速率是
+                **按设备**下发的, 两者可以不同档。
+
+                ⚠️ 不要用驱动自带的 1MHz: 本总线上拉只有 4.7k, Fm+ (1MHz) 要求
+                t_r ≤ 120ns, 而 4.7k × ~25pF 已经约 260ns —— 边沿进不了规格,
+                写可能偶发 NACK。而唤醒路径上 DAC 写失败会**直接拒绝使能电机**
+                (power_state.c), 现场表现为"指令收下了、门不动", 很难查。
+                400k (t_r ≤ 300ns) 与编码器同档, 已在本板上验证。
+
+                写一次 3 字节约 68µs @400k, 而唤醒路径本来就有 2ms 建立余量,
+                提速没有收益。
+
+    endmenu
+
     menu "电流采样 (IPROPI)"
 
         config FOCSTEP_ADC_ATTEN_DB
-            int "ADC 衰减 (dB)"
+            int "ADC 衰减 (dB, 仅上电初值)"
             range 0 12
             default 12
             help
-                12dB ⇒ 量程约 0~3.1V。IPROPI 在 1.5A 档 (VREF=2.35V) 时对应电压
+                12dB ⇒ 量程约 0~3.3V。IPROPI 在 1.5A 档 (VREF=2.35V) 时对应电压
                 ≈2.35V 并被 VREF 钳位, 必须用 12dB 否则量程不够。
+
+                ★ 本项只是**上电初值**: 运行时 ADC 量程会跟随 VREF 自动切换
+                (IPROPI 被钳位在 VREF 上, 量程收窄到刚好覆盖 VREF 才有低电流档的
+                分辨率 —— 保持 12dB 不动时, 单纯降 VREF 并不改善电流测量分辨率)。
+                见 ipropi_set_ceiling_mv() / vref_dac_set()。
 
         config FOCSTEP_R_IPROPI_OHM
             int "R_IPROPI (Ω)"
@@ -222,15 +247,20 @@ menu "FocStepper 平台层"
                 默认按正文 450; **上板用万用表比对后按实测标定**。
 
         config FOCSTEP_ITRIP_MA
-            int "设计斩波阈值 ITRIP (mA)"
+            int "设计斩波阈值 ITRIP (mA, 唤醒默认档)"
             default 1500
             help
-                **这是 ITRIP 的唯一真源**: 固件按本值算出 MCP4725 该输出多少伏
-                (VREF = ITRIP × R_IPROPI × A_IPROPI) —— 唤醒接管档、运行档、
-                自检提示的"可测上限"全部由它推导, 代码里不另存一份档位常量。
+                **这是唤醒默认档的唯一真源**: 固件按本值算出 MCP4725 该输出多少伏
+                (VREF = ITRIP × R_IPROPI × A_IPROPI) —— 唤醒接管档与自检提示的
+                "可测上限"都由它推导, 代码里不另存一份档位常量。
+                运行时可以按负载改档: foc_motor_set_itrip() 传**峰值电流**, 平台按
+                1.25× 留钳位裕量后写 DAC (降档要求电机未使能)。
                 doc.md §5.4 档位表: 0.3A→0.47V / 1.0A→1.57V / 1.5A→2.35V /
-                1.8A→2.82V; VREF≥3.0V 后 DRV 内部钳位 (封顶 1.915A),
-                固件 clamp ≤1.85A。
+                1.8A→2.82V; 固件 clamp ≤1.85A (VREF 2.90V)。
+
+                ⚠️ 1.85A 是**固件自设的余量**, 不是器件钳位: DRV8874 的 VREF 推荐
+                工作范围是 0~3.6V, 手册未规定内部钳位; 真正的硬件边界是 DAC 满量程
+                (≈VDD 3.35V, 折算 ≈2.14A)。取 1.85A 是为了离满量程与推荐上限都留余量。
 
                 ⚠️ 本值同时就是 IPROPI 的**可测上限** (引脚被 DRV 钳在 V_VREF 上)
                 ⇒ FOCSTEP_STALL_CURRENT_MA 与 FOCSTEP_CURRENT_LIMIT 都必须 ≤ 本值,

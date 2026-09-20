@@ -101,6 +101,29 @@ float foc_motor_get_voltage_limit(void);
 /* Kconfig 配的运行电压上限。应用临时改小力矩 (如助动) 后, 用这个恢复。 */
 float foc_motor_default_voltage_limit(void);
 
+/* ── 动态 VREF: 运行时改 ITRIP 档 (应用改档的正式入口) ───────────────
+ *
+ * 用途: 按负载/力矩档换限流阈值 —— 换电机、换助动力矩都不必改硬件。
+ * Kconfig 的 FOCSTEP_ITRIP_MA 只是**唤醒默认档**, 不是唯一档。
+ *
+ * ★ 参数是**峰值相电流**, 不是 ITRIP 本身: 平台按 VREF_DAC_CLAMP_MARGIN (1.25×)
+ *   留出钳位裕量后写进 DAC。理由: IPROPI 的钳位点就是 ITRIP —— 峰值一旦顶到
+ *   钳位, 读数就再也反映不了真实电流, 堵转与力矩判据一起失灵。
+ *
+ * ⚠️ 两条硬约束 (实现里强制, 不靠调用方自觉):
+ *   · 峰值大到留不出裕量 ⇒ ESP_ERR_INVALID_ARG, **不写 DAC** (不静默 clamp);
+ *   · **电机使能中只许升档, 不许降档** —— 要降档先 foc_motor_enable(false)。
+ *
+ * ADC 量程由平台随 VREF 自动跟随 (低电流档才真正拿到分辨率), 调用方不必管。
+ * ITRIP 落到堵转阈值之下时会打 LOGW: 那一档下堵转判定不会触发。 */
+esp_err_t foc_motor_set_itrip(float peak_a);
+
+/* 回到 Kconfig 的默认档 (同样受"使能中不许降档"约束)。 */
+esp_err_t foc_motor_set_itrip_default(void);
+
+/* 当前生效档位 (A)。它同时就是 IPROPI 的可测上限 —— 自检提示不要自己再换算一遍。 */
+float foc_motor_get_itrip(void);
+
 /* 直接给 q 轴力矩 (单位 V, 受 voltage_limit 限幅)。配合 FOC_MODE_TORQUE 使用。
  * 正负号 = 方向。应用可拿它做助动/张紧/保持 —— 具体策略在应用层。 */
 void foc_motor_set_torque(float volts);

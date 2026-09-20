@@ -24,6 +24,7 @@
 #include "kth5701.h"
 #include "ipropi_current_sense.h"
 #include "ipropi_sense.h"
+#include "vref_dac.h" /* 动态 VREF: ITRIP 档 (foc_motor_set_itrip) */
 
 static const char *TAG = "FOC";
 
@@ -796,6 +797,60 @@ float foc_motor_get_voltage_limit(void)
 float foc_motor_default_voltage_limit(void)
 {
     return cfg_float(CONFIG_FOCSTEP_VOLTAGE_LIMIT, 12.0f);
+}
+
+/* ── 动态 VREF: 运行时改 ITRIP 档 ──────────────────────────────────
+ * 功能只做两件 vref_dac 做不到的事, 其余 (裕量换算/上下界/I2C/ADC 量程跟随)
+ * 全在平台层:
+ *   ① 降档守卫 —— 只有本层知道电机是不是正在使能;
+ *   ② 堵转阈值告警 —— 阈值是本层配下去的 (ipropi_stall_config)。
+ */
+static esp_err_t apply_itrip(float itrip_a, const char *why)
+{
+    if (s_motor->enabled && itrip_a < vref_dac_itrip_a()) {
+        /* 降档会让 DRV 立刻按新阈值斩波 (力矩台阶); 更糟的是电流环若仍在要求更大的
+         * 电流, IPROPI 会顶在钳位上 ⇒ 堵转与力矩判据一起失灵。升档没有这个问题。 */
+        ESP_LOGE(TAG, "电机使能中不许降 ITRIP (%.2fA → %.2fA, %s): 先 foc_motor_enable(false)",
+                 (double)vref_dac_itrip_a(), (double)itrip_a, why);
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t ret = vref_dac_set(itrip_a); /* 内部连 ADC 量程一起跟过去 */
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    float stall_a = (float)CONFIG_FOCSTEP_STALL_CURRENT_MA * 0.001f;
+    if (itrip_a < stall_a) {
+        ESP_LOGW(TAG, "ITRIP %.2fA < 堵转阈值 %.2fA: 该档下 IPROPI 先被钳位, 堵转判定不会触发",
+                 (double)itrip_a, (double)stall_a);
+    }
+    return ESP_OK;
+}
+
+esp_err_t foc_motor_set_itrip(float peak_a)
+{
+    if (!s_motor) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* 留不出钳位裕量就**不设档** (平台层同样拒绝, 这里先拦一道给出更清楚的日志) */
+    if (!vref_dac_peak_supported(peak_a)) {
+        ESP_LOGE(TAG, "峰值 %.2fA 留不出 %.2f× 钳位裕量 (上限 %.2fA): 不写 DAC",
+                 (double)peak_a, (double)VREF_DAC_CLAMP_MARGIN, (double)VREF_DAC_MAX_ITRIP_A);
+        return ESP_ERR_INVALID_ARG;
+    }
+    return apply_itrip(vref_dac_itrip_for_peak(peak_a), "峰值档");
+}
+
+esp_err_t foc_motor_set_itrip_default(void)
+{
+    if (!s_motor) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return apply_itrip(vref_dac_default_itrip_a(), "Kconfig 默认档");
+}
+
+float foc_motor_get_itrip(void)
+{
+    return vref_dac_itrip_a();
 }
 
 const char *foc_motor_range_state_str(range_state_t st)

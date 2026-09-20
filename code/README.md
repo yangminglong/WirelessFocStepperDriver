@@ -284,7 +284,8 @@ GPIO16/17 由 **UART0 控制台（4P 排针）与 CAN 收发器共用**，而 **
 | --- | --- | --- |
 | `doc.md` §四、§10.1 | **LEDC ×2 + 2 路方向电平** | `esp_hal_stepper.cpp` 用 LEDC（20kHz/9-bit/LEDC_TIMER_0）；LEDC 走 GPIO 矩阵，任意脚可用 |
 | `doc.md` §10.1 | **`StepperDriver2PWM` + PMODE=低（PH/EN）** | 手册真值表：PWM 模式 `(0,0)=Coast`，PH/EN 模式 `EN=0=Brake`。手册明确 *"In coast mode… cannot be sensed"* ⇒ 4PWM 会让 IPROPI 只在导通期有效 |
-| `doc.md` §五.4 | **MCP4725 动态 VREF**：12-bit DAC 直驱（I2C 0x60），ITRIP 档位表 0.3~1.8A，待机进 PD（VREF=0，60nA typ / 2µA max） | 固定分压两宗罪：① 无法运行时按档降 ITRIP（低电流档分辨率全靠降 VREF）；② 待机无断耗通路（210µA vs PD 60nA） |
+| `doc.md` §五.4 | **MCP4725 动态 VREF**：12-bit DAC 经 R13(470Ω) 驱两片 VREF（I2C 0x60），ITRIP 档位表 0.3~1.85A，**运行时可换档**（`foc_motor_set_itrip(峰值电流)`：平台按 1.25× 留钳位裕量、留不出裕量直接报错，使能中只许升档），待机进 PD（VREF=0，60nA typ / 2µA max） | 固定分压两宗罪：① 无法运行时按档改 ITRIP；② 待机无断耗通路（210µA vs PD 60nA） |
+| `doc.md` §五.4 | **ADC 量程跟随 VREF**（衰减档 0dB:1000／6dB:1900／12dB:3300 mV，按 90% 留边选档，由 `vref_dac_set()` 自动同步） | IPROPI 被钳在 VREF 上 ⇒ 量程宽于 VREF 的部分永远用不到；**只有把量程一起收窄，低电流档的分辨率才真正拿到手**（0.3A 档 LSB 0.52 → 0.16mA）。⚠️ 切档要重配 ADC 通道，窗口内读接口返回 `ESP_ERR_INVALID_STATE`（FOC 循环跳过本次采样，避免用旧标定解释新量程） |
 | `doc.md` §六 待机表 | 有「**MCP4725 PD ≈ 0**」一行（60nA，等效 ≈0） | 睡眠态漏发 DAC PD = 210µA 常挂 3.4V 轨，待机预算当场破 |
 | `doc.md` §10.1 | 电流环走 IPROPI，**`FOCSTEP_TC_FOC_CURRENT`** | 可行，符号需重建、过零点有死区 —— 见 §8 |
 

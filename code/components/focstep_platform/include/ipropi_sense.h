@@ -101,6 +101,26 @@ void ipropi_stall_reset(void);
 /* 供标定: 用当前读数反推 A_IPROPI (给定负载电流) */
 float ipropi_estimate_a_ipropi(float known_load_a, float measured_mv, float r_ipropi_ohm);
 
+/* ── ADC 量程跟随 VREF (动态 VREF 的分辨率联动) ────────────────────
+ *
+ * ★ 为什么需要: IPROPI 引脚被 DRV 内部**钳位在 V_VREF** 上 (§7.3.3.1 的
+ *   IPROPI clamp) ⇒ ADC 只要能覆盖到 VREF 就够, 再宽的档是浪费。
+ *   **保持 12dB 不动时, 单纯降 VREF 并不改变电流测量分辨率** ——
+ *   输入折算 LSB = 量程/4096, 只有把量程也收窄, 低电流档才真正赚到分辨率
+ *   (0.3A 档: VREF 0.47V, 0dB 量程 1000mV → LSB 0.24mV ≈ 0.16mA;
+ *    12dB 量程 3300mV → LSB 0.81mV ≈ 0.52mA)。
+ *
+ * 选档表 = **C6 手册 Table 5-6 的标定有效量程**: 0dB 1000mV / 6dB 1900mV /
+ * 12dB 3300mV(±40mV)。选档按 90% 留边, 见 ipropi_sense.c。
+ * Kconfig 的 FOCSTEP_ADC_ATTEN_DB 是**上电初值**; 一旦调用本接口就由它接管。
+ *
+ * ⚠️ 切档是一次 ADC 重配, **不是原子的**: 切档期间读接口返回
+ *    ESP_ERR_INVALID_STATE, 调用方(如 FOC 循环)跳过本次采样即可 ——
+ *    否则会用旧标定解释新量程的原始码, 得到一个离谱的电流值。
+ */
+int ipropi_set_ceiling_mv(int ceiling_mv);  /* 返回所选档的量程 mV; 失败/未初始化 <0 */
+int ipropi_ceiling_mv(void);                /* 当前档的量程 mV; 未初始化 <0 */
+
 #ifdef __cplusplus
 }
 #endif
