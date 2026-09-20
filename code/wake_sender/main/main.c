@@ -76,7 +76,8 @@ static uint16_t s_seq = 0;
 /* ── 运动驱动的 T 策略 (陀螺仪可插拔) ──────────────────────────
  * 被运动唤醒 → T 调小 (快响应); 倒计时内无新动作 → T 调回 (省电)。
  * 陀螺仪硬件未上时用命令台 `motion` 模拟; 接上后把它的 INT 接到
- * SENDER_MOTION_GPIO 即可 (轮询电平, 20Hz 足够判"有人动了")。 */
+ * SENDER_MOTION_GPIO 即可 (轮询下降沿, 20Hz 足够判"有人动了")。
+ * ⚠️ 低有效: LIS3DH 的 INT1 必须配成低有效 + 锁存 (doc_wake_sender.md §4.2)。 */
 static bool s_motion_active = false;
 static bool s_t_auto = true;
 static TickType_t s_motion_since = 0;
@@ -305,15 +306,20 @@ static void policy_on_motion(void)
 
 static void policy_tick(void)
 {
-    /* 运动检测输入: 接上陀螺仪 INT 后, 电平变高即视为"有人动了"。
+    /* 运动检测输入: **低有效** —— 按键/干接点/运动三件事共用一次 ext1 的
+     * "任意低"口径 (doc_wake_sender.md §4.2/§4.8), 所以这里数的是**下降沿**。
      * 未接 (GPIO<0) 时只靠命令台 `motion` 模拟。 */
 #if CONFIG_SENDER_MOTION_GPIO >= 0
-    static int last_level = 0;
+    /* 初值 1: 上电前就有动作 (INT 已是低) 时, 第一个采样点也算一次。 */
+    static int last_level = 1;
     int lvl = gpio_get_level((gpio_num_t)CONFIG_SENDER_MOTION_GPIO);
-    if (lvl && !last_level) {
+    if (!lvl && last_level) {
         policy_on_motion();
     }
     last_level = lvl;
+    /* ⚠️ INT1 是**锁存**低有效: 一段低电平只算一次动作 —— 正确, 因为
+     * "有人动了"本来就是事件而非持续状态。清锁存 (读 INT1_SRC) 由 LIS3DH
+     * 驱动负责, 见 §4.2 纪律二; 不清则第二次动作看不到新的下降沿。 */
 #endif
 
     if (s_t_auto && s_motion_active &&
@@ -515,12 +521,13 @@ void app_main(void)
 
 #if CONFIG_SENDER_MOTION_GPIO >= 0
     /* 运动检测输入 (陀螺仪 INT): 只做输入轮询, 20Hz 足够判"有人动了"。
-     * 陀螺仪换型/换实现时只改这里, 策略代码 (policy_*) 不动。 */
+     * 陀螺仪换型/换实现时只改这里, 策略代码 (policy_*) 不动。
+     * 低有效 ⇒ 上拉: 传感器没贴/没接时读高, 不会误报"有人动了"。 */
     {
         gpio_config_t mg = {
             .pin_bit_mask = 1ULL << CONFIG_SENDER_MOTION_GPIO,
             .mode = GPIO_MODE_INPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
             .pull_down_en = GPIO_PULLDOWN_DISABLE,
             .intr_type = GPIO_INTR_DISABLE,
         };
